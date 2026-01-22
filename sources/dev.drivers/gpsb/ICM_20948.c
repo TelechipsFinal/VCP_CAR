@@ -12,14 +12,13 @@
 ***************************************************************************************************
 */
 
-
+#include <sal_internal.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 #include <gpsb.h>
 #include <gpio.h>
 #include <ICM_20948.h>
-#include <sal_internal.h>
+
 
 uint32 DMA_Semaphore_ID;
 const uint8 DMA_Semaphore[] = "DMA_SEM";
@@ -30,24 +29,6 @@ static uint32 __attribute__((aligned(32))) tx_dma_buf[ICM20948_DMA_BUF_SIZE / 4]
 static uint32 __attribute__((aligned(32))) rx_dma_buf[ICM20948_DMA_BUF_SIZE / 4];
 
 static volatile uint8 DMA_ERROR = 0;
-
-void Print_Float_Value(float value, uint32 scale)
-{
-    sint32 integer;
-    sint32 fraction;
-
-    if (value < 0.0f)
-    {
-        mcu_printf("-");
-        value = -value;
-    }
-
-    integer  = (sint32)value;
-    fraction = (sint32)((value - (float)integer) * scale);
-
-    mcu_printf("%d.%03d", integer, fraction);
-}
-
 
 void ICM_20948_SelectBank(uint8 bank) {
     uint8 tx_buf[2] = {ICM20948_REG_BANK_SEL & 0x7F, bank << 4};

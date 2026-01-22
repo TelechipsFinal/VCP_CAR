@@ -24,6 +24,7 @@ ASMSRCS += sal.S
 
 SRCS += sal_api.c
 
+
 ifeq ($(MCU_BSP_TARGET_OS), ucos)
     include $(MCU_BSP_SAL_PATH)/sal_ucos/rules.mk
 endif
