@@ -30,6 +30,9 @@
 #include <printf_float.h>
 #include <imu_calibration.h>
 #include <servo_control.h>
+#include <ADXL345_test.h>
+#include <ADXL345.h>
+
 
 #if (APLT_LINUX_SUPPORT_SPI_DEMO == 1)
     #include <spi_eccp.h>
@@ -74,20 +77,20 @@
 #define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 3)      
 #define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 4)      
 #define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 5)      // 최저 우선순위
-
+#define ADXL_TEST_TASK_PRIO     (SAL_PRIO_APP_CFG + 6)      // ✅ 추가
 
 // Task Stack Sizes - 극한 최소화
 #define SAFETY_TASK_STK_SIZE    (384)   // 1.5KB
 #define CAN_RX_TASK_STK_SIZE    (256)   // 1KB
 #define MOTOR_TASK_STK_SIZE     (256)   // 1KB
-#define IMU_SUSP_TASK_STK_SIZE  (512)   // 2KB (가장 중요)
+#define IMU_SUSP_TASK_STK_SIZE  (256)   // 2KB (가장 중요) 512로 돌리기@@@@@@@@@@@@@@@
 #define HEIGHT_TASK_STK_SIZE    (256)   // 1KB
-#define MONITOR_TASK_STK_SIZE   (256)   // 1KB
-
-
+#define MONITOR_TASK_STK_SIZE   (128)   // 1KB    
+#define ADXL_TEST_TASK_STK_SIZE (256)   // 1KB  ✅ 추가
+ 
 
 // Control Frequencies
-#define SAFETY_PERIOD_MS        (10)    // 100Hz
+#define SAFETY_PERIOD_MS        (10)    // 100Hz 
 #define MOTOR_PERIOD_MS         (10)    // 100Hz
 #define IMU_SUSP_PERIOD_MS      (10)    // 100Hz
 #define HEIGHT_PERIOD_MS        (50)    // 20Hz
@@ -124,8 +127,6 @@ typedef enum {
     SAFETY_EMERGENCY,
     SAFETY_CRITICAL
 } SafetyLevel_t;
-
-
 /*
 ***************************************************************************************************
 *                                         PID CONFIGURATION
@@ -155,22 +156,11 @@ typedef struct {
 #define DAMPING_KP_HARD     (0.8f)  // 고속: 강한 댐핑
 #define DAMPING_KD_HARD     (0.0f)
 
-// ✅ Skyhook 댐핑 게인
-#define SKYHOOK_GAIN        (0.5f)   // 차체 속도 기반 댐핑
-#define GROUNDHOOK_GAIN     (0.0f)   // 바퀴 속도 기반 댐핑
-
-// ✅ Anti-Dive & Anti-Squat 게인
-#define ANTI_DIVE_GAIN      (3.0f)   // 제동 시 앞 처짐 방지
-#define ANTI_SQUAT_GAIN     (3.0f)   // 가속 시 뒤 처짐 방지
-#define BRAKE_THRESHOLD     (0.5f)   // 급제동 임계값 (G)
-#define ACCEL_THRESHOLD     (0.5f)   // 급가속 임계값 (G)
-
 // 속도 임계값 (%)
 #define SPEED_THRESHOLD_LOW     (30.0f)   // 30% 이하: 저속
 #define SPEED_THRESHOLD_HIGH    (70.0f)   // 70% 이상: 고속
 
 #define MAX_TILT_ANGLE 45.0f
-
 /*
 ***************************************************************************************************
 *                                         GLOBAL VARIABLES
@@ -187,6 +177,7 @@ static uint32 gMotorTaskID = 0;
 static uint32 gIMUSuspTaskID = 0;
 static uint32 gHeightTaskID = 0;
 static uint32 gMonitorTaskID = 0;
+static uint32 gADXL345TestTaskID = 0;
 
 // Task Stacks
 static uint32 gSafetyTaskStk[SAFETY_TASK_STK_SIZE];
@@ -195,7 +186,7 @@ static uint32 gMotorTaskStk[MOTOR_TASK_STK_SIZE];
 static uint32 gIMUSuspTaskStk[IMU_SUSP_TASK_STK_SIZE];
 static uint32 gHeightTaskStk[HEIGHT_TASK_STK_SIZE];
 static uint32 gMonitorTaskStk[MONITOR_TASK_STK_SIZE];
-
+static uint32 gADXL345TestTaskStk[ADXL_TEST_TASK_STK_SIZE];
 
 // Shared Data Structures
 typedef struct {
@@ -410,7 +401,7 @@ void cmain (void)
     g_SafetyData.suspension_range_limit = 1.0f; 
 
     // ✅ 서보 초기값 설정
-    for(uint8 i = 0; i < 4; i++) {
+    for(uint8 i = 0; i < 4; i++){
         g_ServoData.position[i] = 90.0f;
     }
     
@@ -467,89 +458,120 @@ void Main_StartTask(void * pArg)
     mcu_printf("\n[SYSTEM] Initializing...\n");
 
     // Initialize IMU
-    if(ICM_20948_Init() == 0) {
-        mcu_printf("[SYSTEM] IMU Initialized\n");
+    // if(ICM_20948_Init() == 0) {
+    //     mcu_printf("[SYSTEM] IMU Initialized\n");
+    // } else {
+    //     mcu_printf("[ERROR] IMU Init Failed\n");
+    // }
+
+// 2. ADXL345 (CS0/GPC8) 초기화 및 하드웨어 체크
+    // 앞서 만든 ADXL345_Test_Init()을 사용하여 GPC 핀들을 설정합니다.
+    if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] ADXL345 Hardware/GPIO Configured\n");
+        
+        // 하드웨어 ID(0xE5) 확인 시도
+        uint8 devid = 0;
+        if(ADXL345_Test_ReadID(&devid) == SAL_RET_SUCCESS) {
+            mcu_printf("[SYSTEM] ADXL345 Detected! ID: 0x%02X\n", devid);
+        } else {
+            mcu_printf("[WARNING] ADXL345 ID Mismatch or Not Found (0x%02X)\n", devid);
+        }
     } else {
-        mcu_printf("[ERROR] IMU Init Failed\n");
+        mcu_printf("[ERROR] ADXL345 Hardware Init Failed\n");
     }
+
     
    // Create application tasks
     AppTaskCreate();
     
     mcu_printf("[SYSTEM] Creating Control Tasks...\n\n");
     
-    // Task 0: Safety Monitor (100Hz)
-    err = SAL_TaskCreate(&gSafetyTaskID,
-                        (const uint8 *)"Safety_Monitor",
-                        (SALTaskFunc)&Safety_Monitor_Task,
-                        &gSafetyTaskStk[0],
-                        SAFETY_TASK_STK_SIZE,
-                        SAFETY_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Safety Task Created (Priority: %d, 100Hz)\n", SAFETY_TASK_PRIO);
-    }
+    // // Task 0: Safety Monitor (100Hz)
+    // err = SAL_TaskCreate(&gSafetyTaskID,
+    //                     (const uint8 *)"Safety_Monitor",
+    //                     (SALTaskFunc)&Safety_Monitor_Task,
+    //                     &gSafetyTaskStk[0],
+    //                     SAFETY_TASK_STK_SIZE,
+    //                     SAFETY_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] Safety Task Created (Priority: %d, 100Hz)\n", SAFETY_TASK_PRIO);
+    // }
     
-    // Task 1: CAN RX (Event-driven)
-    err = SAL_TaskCreate(&gCANRxTaskID,
-                        (const uint8 *)"CAN_RX",
-                        (SALTaskFunc)&CAN_RX_Task,
-                        &gCANRxTaskStk[0],
-                        CAN_RX_TASK_STK_SIZE,
-                        CAN_RX_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] CAN RX Task Created (Priority: %d, Event)\n", CAN_RX_TASK_PRIO);
-    }
+    // // Task 1: CAN RX (Event-driven)
+    // err = SAL_TaskCreate(&gCANRxTaskID,
+    //                     (const uint8 *)"CAN_RX",
+    //                     (SALTaskFunc)&CAN_RX_Task,
+    //                     &gCANRxTaskStk[0],
+    //                     CAN_RX_TASK_STK_SIZE,
+    //                     CAN_RX_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] CAN RX Task Created (Priority: %d, Event)\n", CAN_RX_TASK_PRIO);
+    // }
     
-    // Task 2: Motor Control (100Hz)
-    err = SAL_TaskCreate(&gMotorTaskID,
-                        (const uint8 *)"Motor_Control",
-                        (SALTaskFunc)&Motor_Control_Task,
-                        &gMotorTaskStk[0],
-                        MOTOR_TASK_STK_SIZE,
-                        MOTOR_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Motor Task Created (Priority: %d, 100Hz)\n", MOTOR_TASK_PRIO);
-    }
+    // // Task 2: Motor Control (100Hz)                                                                                         
+    // err = SAL_TaskCreate(&gMotorTaskID,
+    //                     (const uint8 *)"Motor_Control",
+    //                     (SALTaskFunc)&Motor_Control_Task,
+    //                     &gMotorTaskStk[0],
+    //                     MOTOR_TASK_STK_SIZE,
+    //                     MOTOR_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] Motor Task Created (Priority: %d, 100Hz)\n", MOTOR_TASK_PRIO);
+    // }
     
-    // Task 3: IMU + Suspension (100Hz)
-    err = SAL_TaskCreate(&gIMUSuspTaskID,
-                        (const uint8 *)"IMU_Suspension",
-                        (SALTaskFunc)&IMU_Suspension_Task,
-                        &gIMUSuspTaskStk[0],
-                        IMU_SUSP_TASK_STK_SIZE,
-                        IMU_SUSP_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] IMU+Susp Task Created (Priority: %d, 100Hz)\n", IMU_SUSP_TASK_PRIO);
-    }
+    // // Task 3: IMU + Suspension (100Hz)
+    // err = SAL_TaskCreate(&gIMUSuspTaskID,
+    //                     (const uint8 *)"IMU_Suspension",
+    //                     (SALTaskFunc)&IMU_Suspension_Task,
+    //                     &gIMUSuspTaskStk[0],
+    //                     IMU_SUSP_TASK_STK_SIZE,
+    //                     IMU_SUSP_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] IMU+Susp Task Created (Priority: %d, 100Hz)\n", IMU_SUSP_TASK_PRIO);
+    // }
     
-    // Task 4: Height Control (20Hz)
-    err = SAL_TaskCreate(&gHeightTaskID,
-                        (const uint8 *)"Height_Control",
-                        (SALTaskFunc)&Height_Control_Task,
-                        &gHeightTaskStk[0],
-                        HEIGHT_TASK_STK_SIZE,
-                        HEIGHT_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Height Task Created (Priority: %d, 20Hz)\n", HEIGHT_TASK_PRIO);
-    }
+    // // Task 4: Height Control (20Hz)
+    // err = SAL_TaskCreate(&gHeightTaskID,
+    //                     (const uint8 *)"Height_Control",
+    //                     (SALTaskFunc)&Height_Control_Task,
+    //                     &gHeightTaskStk[0],
+    //                     HEIGHT_TASK_STK_SIZE,
+    //                     HEIGHT_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] Height Task Created (Priority: %d, 20Hz)\n", HEIGHT_TASK_PRIO);
+    // }
     
-    // Task 5: Monitoring (10Hz)
-    err = SAL_TaskCreate(&gMonitorTaskID,
-                        (const uint8 *)"Monitoring",
-                        (SALTaskFunc)&Monitoring_Task,
-                        &gMonitorTaskStk[0],
-                        MONITOR_TASK_STK_SIZE,
-                        MONITOR_TASK_PRIO,
+    // // // Task 5: Monitoring (10Hz)
+    // err = SAL_TaskCreate(&gMonitorTaskID,
+    //                     (const uint8 *)"Monitoring",
+    //                     (SALTaskFunc)&Monitoring_Task,
+    //                     &gMonitorTaskStk[0],
+    //                     MONITOR_TASK_STK_SIZE,
+    //                     MONITOR_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
+    // }
+    err = SAL_TaskCreate(&gADXL345TestTaskID,
+                        (const uint8 *)"ADXL345_Test",
+                        (SALTaskFunc)&ADXL345_Test_Task, // 수정한 테스트 함수
+                        &gADXL345TestTaskStk[0],
+                        ADXL_TEST_TASK_STK_SIZE,
+                        ADXL_TEST_TASK_PRIO,
                         NULL);
+
     if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
+        mcu_printf("[SYSTEM] ADXL345 Test Task Created Successfully\n");
+    } else {
+        mcu_printf("[ERROR] Failed to Create ADXL345 Test Task\n");
     }
-    mcu_printf("[SYSTEM] All Tasks Started!\n");
+
+    mcu_printf("[SYSTEM] System Initialization Sequence Finished!\n"); 
     mcu_printf("=========================================\n\n");
     
     // Main task finished
@@ -867,12 +889,12 @@ void Motor_Control_Task(void *pArg) {
 ***************************************************************************************************
 *                                          IMU_Suspension_Task
 ***************************************************************************************************
-*/void IMU_Suspension_Task(void *pArg) {
+*/
+void IMU_Suspension_Task(void *pArg) {
     (void)pArg;
     
     uint32 start_tick, current_tick;
     float servo_position[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-    uint32 servo_output_counter = 0;
     
     static uint32 imu_sample_count = 0;
     
@@ -883,23 +905,66 @@ void Motor_Control_Task(void *pArg) {
     uint32 calib_samples = 0;
     const uint32 CALIB_SAMPLES = 100;
 
-    // Skyhook 댐핑용 변수
-    static float prev_chassis_velocity_z = 0.0f;
-    static float prev_servo_position[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-
     IMU_Data imuRaw;
     
     mcu_printf("[IMU_SUSP] Task Started\n");
     mcu_printf("  - IMU Sampling: 100Hz (10ms)\n");
     mcu_printf("  - PID Control:  100Hz (10ms)\n");
-    mcu_printf("  - Servo Output: 50Hz (20ms) via PDM\n");
+    mcu_printf("  - Servo Output: 100Hz (10ms) via PDM\n");
     mcu_printf("  - Adaptive Damping: Speed-Dependent\n");
-    mcu_printf("  - Skyhook Damping: Enabled\n");
-    mcu_printf("  - Anti-Dive/Squat: Enabled\n");
     mcu_printf("  - Calibrating Roll/Pitch offset...\n\n");
     
     // 서보 초기화
     Servo_Init();
+    
+    mcu_printf("\n╔════════════════════════════╗\n");
+    mcu_printf("║   SERVO RANGE TEST START   ║\n");
+    mcu_printf("╚════════════════════════════╝\n\n");
+    
+    float test_angles[4];
+    
+    // Test 1: 중립 (90도)
+    mcu_printf("▶ Test 1: Neutral (90deg)\n");
+    Servo_SetNeutral_All();
+    SAL_TaskSleep(2000);
+    
+    // Test 2: 최소 (0도)
+    mcu_printf("▶ Test 2: Minimum (0deg)\n");
+    test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = 0.0f;
+    Servo_SetPosition_All(test_angles);
+    SAL_TaskSleep(2000);
+    
+    // Test 3: 최대 (180도)
+    mcu_printf("▶ Test 3: Maximum (180deg)\n");
+    test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = 180.0f;
+    Servo_SetPosition_All(test_angles);
+    SAL_TaskSleep(2000);
+    
+    // Test 4: 스윕 테스트
+    mcu_printf("▶ Test 4: Sweep (0→180→0)\n");
+    for(float angle = 0; angle <= 180; angle += 10) {
+        test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = angle;
+        Servo_SetPosition_All(test_angles);
+        SAL_TaskSleep(100);
+    }
+    for(float angle = 180; angle >= 0; angle -= 10) {
+        test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = angle;
+        Servo_SetPosition_All(test_angles);
+        SAL_TaskSleep(100);
+    }
+    
+    // Test 5: 개별 제어
+    mcu_printf("▶ Test 5: Individual control\n");
+    test_angles[0] = 45;   // FL
+    test_angles[1] = 90;   // FR
+    test_angles[2] = 135;  // RL
+    test_angles[3] = 180;  // RR
+    Servo_SetPosition_All(test_angles);
+    SAL_TaskSleep(3000);
+    
+    // 중립 복귀
+    Servo_SetNeutral_All();
+    mcu_printf("\n✅ SERVO TEST COMPLETE!\n\n");
     
     // 초기 위치 설정
     for(uint8 i = 0; i < 4; i++) {
@@ -909,7 +974,7 @@ void Motor_Control_Task(void *pArg) {
     
     SAL_CoreCriticalEnter();
     for(uint8 i = 0; i < 4; i++) {
-        g_ServoData.position[i] = 90.0f;
+        g_ServoData.position[i] = 90.0f;  
     }
     SAL_CoreCriticalExit();
     
@@ -954,7 +1019,6 @@ void Motor_Control_Task(void *pArg) {
                 mcu_printf(" deg\n\n");
             }
             
-            // ✅ 캘리브레이션 중에도 IMU 데이터 업데이트!
             SAL_CoreCriticalEnter();
             g_IMUData.roll  = 0.0f;
             g_IMUData.pitch = 0.0f;
@@ -975,10 +1039,9 @@ void Motor_Control_Task(void *pArg) {
             continue;
         }
         
-        // ========== 3. 안정화 대기 (✅ 제거 또는 IMU 업데이트 유지) ==========
+        // ========== 3. Kalman 필터링 ==========
         imu_sample_count++;
         
-        // ✅ 안정화 대기 중에도 IMU 데이터는 업데이트!
         float roll_acc  = atan2f(imuRaw.accel_y, imuRaw.accel_z) * 180.0f / M_PI;
         float pitch_acc = atan2f(-imuRaw.accel_x,
                           sqrtf(imuRaw.accel_y*imuRaw.accel_y +
@@ -992,7 +1055,7 @@ void Motor_Control_Task(void *pArg) {
         float roll  = Kalman_Update(&kalman_roll,  roll_acc,  imuRaw.gyro_x, dt);
         float pitch = Kalman_Update(&kalman_pitch, pitch_acc, imuRaw.gyro_y, dt);
         
-        // ✅ 항상 IMU 데이터 업데이트 (안정화 대기 중에도!)
+        // IMU 데이터 업데이트
         SAL_CoreCriticalEnter();
         g_IMUData.roll  = fmaxf(fminf(roll,  MAX_TILT_ANGLE), -MAX_TILT_ANGLE);
         g_IMUData.pitch = fmaxf(fminf(pitch, MAX_TILT_ANGLE), -MAX_TILT_ANGLE);
@@ -1005,7 +1068,7 @@ void Motor_Control_Task(void *pArg) {
         SAL_GetTickCount(&g_IMUData.last_update_time);
         SAL_CoreCriticalExit();
         
-        // ✅ 안정화 대기 중에는 제어만 스킵
+        // 안정화 대기
         if(imu_sample_count < 100) {
             for(uint8 i = 0; i < 4; i++) {
                 servo_position[i] = 90.0f;
@@ -1022,7 +1085,7 @@ void Motor_Control_Task(void *pArg) {
             continue;
         }
         
-        // ========== 6. 안전 레벨 및 속도 읽기 ==========
+        // ========== 4. 안전 레벨 및 속도 읽기 ==========
         SAL_CoreCriticalEnter();
         SafetyLevel_t safety = g_SafetyData.level;
         uint8 susp_disabled = g_SafetyData.suspension_disabled;
@@ -1034,7 +1097,7 @@ void Motor_Control_Task(void *pArg) {
         float current_speed = g_MotorData.current_speed;
         SAL_CoreCriticalExit();
         
-        // ========== 7. 비상 상황: 중립 복귀 ==========
+        // ========== 5. 비상 상황: 중립 복귀 ==========
         if(susp_disabled || safety >= SAFETY_EMERGENCY) {
             PID_Reset(&pid_roll);
             PID_Reset(&pid_pitch);
@@ -1044,29 +1107,24 @@ void Motor_Control_Task(void *pArg) {
                 servo_position[i] += (90.0f - servo_position[i]) * 0.05f;
             }
             
-            servo_output_counter++;
-            if(servo_output_counter >= 2) {
-                Servo_SetPosition_All(servo_position);
-                servo_output_counter = 0;
-                
-                // ✅ 비상 모드에서도 g_ServoData 업데이트
-                SAL_CoreCriticalEnter();
-                for(uint8 i = 0; i < 4; i++) {
-                    g_ServoData.position[i] = servo_position[i];
-                }
-                SAL_CoreCriticalExit();
+            Servo_SetPosition_All(servo_position);
+            
+            SAL_CoreCriticalEnter();
+            for(uint8 i = 0; i < 4; i++) {
+                g_ServoData.position[i] = servo_position[i];
             }
+            SAL_CoreCriticalExit();
             
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
             continue;
         }
         
-        // ========== 8. CAN 명령 읽기 ==========
+        // ========== 6. CAN 명령 읽기 ==========
         SAL_CoreCriticalEnter();
         uint8 leveling_on = g_CANData.leveling_enable;
         SAL_CoreCriticalExit();
         
-        // ========== 9. Auto-Leveling PID ==========
+        // ========== 7. Auto-Leveling PID ==========
         float leveling[4] = {0, 0, 0, 0};
 
         static uint8 pid_initialized = 0;
@@ -1098,28 +1156,7 @@ void Motor_Control_Task(void *pArg) {
             PID_Reset(&pid_pitch);
         }
         
-        // ========== 10. ✅ Anti-Dive & Anti-Squat (제동/가속 자세 제어) ==========
-        float dive_squat[4] = {0, 0, 0, 0};
-        float longitudinal_accel = imuRaw.accel_x;  // 전후방 가속도
-        
-        if(longitudinal_accel < -BRAKE_THRESHOLD * 9.81f) {
-            // 급제동: Anti-Dive (앞 처짐 방지)
-            float dive_compensation = fabs(longitudinal_accel) / 9.81f * ANTI_DIVE_GAIN;
-            dive_squat[0] = -dive_compensation;      // FL 낮춤 (단단하게)
-            dive_squat[1] = -dive_compensation;      // FR 낮춤
-            dive_squat[2] = dive_compensation * 0.5f;  // RL 약간 높임
-            dive_squat[3] = dive_compensation * 0.5f;  // RR 약간 높임
-        }
-        else if(longitudinal_accel > ACCEL_THRESHOLD * 9.81f) {
-            // 급가속: Anti-Squat (뒤 처짐 방지)
-            float squat_compensation = longitudinal_accel / 9.81f * ANTI_SQUAT_GAIN;
-            dive_squat[2] = -squat_compensation;      // RL 낮춤 (단단하게)
-            dive_squat[3] = -squat_compensation;      // RR 낮춤
-            dive_squat[0] = squat_compensation * 0.5f;  // FL 약간 높임
-            dive_squat[1] = squat_compensation * 0.5f;  // FR 약간 높임
-        }
-        
-                // ========== 11. ✅ 속도 의존 댐핑 + Skyhook (개선) ==========
+        // ========== 8. 속도 의존 댐핑 ==========
         static float prev_accel_z = 0;
         float damping[4] = {0, 0, 0, 0};
         
@@ -1132,77 +1169,52 @@ void Motor_Control_Task(void *pArg) {
         if(current_speed < SPEED_THRESHOLD_LOW) {
             damping_kp = DAMPING_KP_SOFT;
             damping_kd = DAMPING_KD_SOFT;
-            max_damping = 10.0f;  // 15 → 10
+            max_damping = 10.0f;
         } 
         else if(current_speed < SPEED_THRESHOLD_HIGH) {
             damping_kp = DAMPING_KP_MEDIUM;
             damping_kd = DAMPING_KD_MEDIUM;
-            max_damping = 12.0f;  // 20 → 12
+            max_damping = 12.0f;
         } 
         else {
             damping_kp = DAMPING_KP_HARD;
             damping_kd = DAMPING_KD_HARD;
-            max_damping = 15.0f;  // 25 → 15
+            max_damping = 15.0f;
         }
         
         // 실시간 PID 게인 업데이트
         pid_damping.Kp = damping_kp;
         pid_damping.Kd = damping_kd;
         
-        // 기본 댐핑 계산
+        // 댐핑 계산
         float damping_control = PID_Update(&pid_damping, 0.0f, accel_change / 9.81f);
         
-        // ✅ 차체 수직 속도 계산 (저역통과 필터 추가)
-        float raw_velocity = prev_chassis_velocity_z + (imuRaw.accel_z * dt);
-        const float velocity_alpha = 0.3f;  // 저역통과 필터
-        float chassis_velocity_z = velocity_alpha * raw_velocity + (1.0f - velocity_alpha) * prev_chassis_velocity_z;
-        prev_chassis_velocity_z = chassis_velocity_z;
-        
-        // ✅ 속도 리밋 추가 (발산 방지)
-        if(chassis_velocity_z > 2.0f) chassis_velocity_z = 2.0f;
-        if(chassis_velocity_z < -2.0f) chassis_velocity_z = -2.0f;
-        
-        // 각 바퀴의 서스펜션 속도 계산
         for(uint8 i = 0; i < 4; i++) {
-            float suspension_velocity = (servo_position[i] - prev_servo_position[i]) / dt;
-            
-            // ✅ Skyhook 댐핑 (감소된 게인)
-            float skyhook_damping = 0;
-            if((chassis_velocity_z * suspension_velocity) > 0) {
-                // 같은 방향 → 강한 댐핑
-                skyhook_damping = SKYHOOK_GAIN * chassis_velocity_z;
-            } else {
-                // 반대 방향 → 약한 댐핑
-                skyhook_damping = GROUNDHOOK_GAIN * suspension_velocity;
-            }
-            
-            damping[i] = damping_control + skyhook_damping;
+            damping[i] = damping_control;
             
             // 범위 제한
             float max_damp = max_damping * range_limit;
             if(damping[i] > max_damp) damping[i] = max_damp;
             if(damping[i] < -max_damp) damping[i] = -max_damp;
-            
-            prev_servo_position[i] = servo_position[i];
         }
         
-        // ========== 12. Height Offset 읽기 ==========
-        SAL_CoreCriticalEnter();
+        // ========== 9. Height Offset 읽기 ==========
+        SAL_CoreCriticalEnter(); 
         float height = g_HeightData.height_offset;
         SAL_CoreCriticalExit();
         
-        // ========== 13. ✅ 통합 제어 + 슬루레이트 리미터 ==========
+        // ========== 10. 통합 제어 + 슬루레이트 리미터 ==========
         static float prev_target[4] = {90.0f, 90.0f, 90.0f, 90.0f};
         
         for(uint8 i = 0; i < 4; i++) {
-            float target = 90.0f + height + leveling[i] + damping[i] + dive_squat[i];
+            float target = 90.0f + height + leveling[i] + damping[i];
             
             // 안전 범위 제한
-            float safe_range = 45.0f * range_limit;
+            float safe_range = 90.0f * range_limit;
             if(target > 90.0f + safe_range) target = 90.0f + safe_range;
             if(target < 90.0f - safe_range) target = 90.0f - safe_range;
             
-            // ✅ 슬루레이트 리미터 (급격한 변화 방지)
+            // 슬루레이트 리미터 (급격한 변화 방지)
             float max_change = 5.0f;  // 주기당 최대 5° 변화
             float change = target - prev_target[i];
             
@@ -1216,20 +1228,16 @@ void Motor_Control_Task(void *pArg) {
             servo_position[i] = target;
         }
         
-        // ========== 14. 서보 출력 (50Hz via PDM) ==========
-        servo_output_counter++;
-        if(servo_output_counter >= 2) {
-            Servo_SetPosition_All(servo_position);
-            servo_output_counter = 0;
-            
-            SAL_CoreCriticalEnter();
-            for(uint8 i = 0; i < 4; i++) {
-                g_ServoData.position[i] = servo_position[i];
-            }
-            SAL_CoreCriticalExit();
-        }
+        // ========== 11. 서보 출력 ==========
+        Servo_SetPosition_All(servo_position);
         
-        // ========== 15. Sleep ==========
+        SAL_CoreCriticalEnter();
+        for(uint8 i = 0; i < 4; i++) {
+            g_ServoData.position[i] = servo_position[i];
+        }
+        SAL_CoreCriticalExit();
+        
+        // ========== 12. Sleep ==========
         SAL_GetTickCount(&current_tick);
         uint32 elapsed = current_tick - start_tick;
         if(elapsed < IMU_SUSP_PERIOD_MS) {
@@ -1533,4 +1541,3 @@ static void DisplayOTPInfo(void)
 }
 
 #endif  // ( MCU_BSP_SUPPORT_APP_BASE == 1 )
-

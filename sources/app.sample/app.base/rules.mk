@@ -29,3 +29,4 @@ SRCS += kalman_filter.c
 SRCS += printf_float.c
 SRCS += imu_calibration.c
 SRCS += servo_control.c
+SRCS += ADXL345_test.c
