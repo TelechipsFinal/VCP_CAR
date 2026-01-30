@@ -1,122 +1,161 @@
 #include <sal_internal.h>
 #include <debug.h>
 #include <stdint.h>
-#include <gpsb.h>
+#include <i2c.h>
 #include <gpio.h>
 #include <ADXL345.h>
 
-SALRetCode_t ADXL345_Test_Init(void) {
-    mcu_printf("[ADXL345] Initializing SPI Port 1 (Ch 0)...\n");
+static uint8 ADXL345_I2C_Addr(void)
+{
+    return (uint8)(ADXL345_I2C_ADDR_7BIT << 1U);
+}
 
-    GPIO_Config(GPIO_GPC(8), GPIO_INPUT); 
-
-    /* 1. GPIO 설정 (ICM 설정 복제) */
-    GPIO_Config(ADXL345_CS0_GPIO, GPIO_FUNC(0) | GPIO_OUTPUT);
-    GPIO_Set(ADXL345_CS0_GPIO, 1); // CS High로 시작 (SPI 모드 강제)
-
-    GPIO_Config(ADXL345_SCLK_GPIO, GPIO_FUNC(ADXL345_GPIO_FUNC));
-    GPIO_Config(ADXL345_MOSI_GPIO, GPIO_FUNC(ADXL345_GPIO_FUNC));
-    // MISO는 반드시 입력 버퍼 활성화
-    GPIO_Config(ADXL345_MISO_GPIO, GPIO_FUNC(ADXL345_GPIO_FUNC) | GPIO_INPUT | GPIO_INPUTBUF_EN);
-
-    GPIO_Set(ADXL345_MISO_GPIO, GPIO_PULLUP);
-    /* 2. GPSB Open */
-    GPSBOpenParam_t param = {
-        .uiSdo = ADXL345_MOSI_GPIO,
-        .uiSdi = ADXL345_MISO_GPIO,
-        .uiSclk = ADXL345_SCLK_GPIO,
-        .uiIsSlave = GPSB_MASTER_MODE,
-        .uiDmaBufSize = 0,
-        .pDmaAddrTx = NULL,
-        .pDmaAddrRx = NULL,
-        .fbCallback = NULL,
-        .pArg = NULL
-    };
-
-    GPSB_Close(ADXL345_CHANNEL); 
+SALRetCode_t ADXL345_Test_Init(void)
+{
+    static uint8 initialized = 0;
+    SALRetCode_t ret;
     
-    if(GPSB_Open(ADXL345_CHANNEL, param) != SAL_RET_SUCCESS) {
-        // 만약 여기서 실패한다면, Main_StartTask에서 이미 열린 것입니다.
-        // 강제로 진행하려면 Close 후 재오픈이 가장 확실합니다.
-        mcu_printf("[ADXL345] GPSB Open Fail - Already in use?\n");
-        return SAL_RET_FAILED; 
+    if (initialized) {
+        mcu_printf("[ADXL345] Already initialized\n");
+        return SAL_RET_SUCCESS;
+    }
+    
+    mcu_printf("[ADXL345] Initializing I2C%d Port%d (GPB0/1)...\n",
+               ADXL345_I2C_CH, ADXL345_I2C_PORT);
+
+    // I2C 초기화
+    ret = I2C_Open((uint8)ADXL345_I2C_CH, 
+                   (uint32)ADXL345_I2C_PORT,
+                   (uint32)ADXL345_I2C_SPEED_KHZ, 
+                   NULL, NULL);
+    
+    if (ret != SAL_RET_SUCCESS) {
+        mcu_printf("[ADXL345] I2C Open Failed (ret=%d)\n", ret);
+        return SAL_RET_FAILED;
     }
 
-    GPSB_SetMode(ADXL345_CHANNEL, GPSB_MODE_3); // CPOL=1, CPHA=1
-    GPSB_SetBpw(ADXL345_CHANNEL, 8);
-    GPSB_SetSpeed(ADXL345_CHANNEL, 100000); 
+    SAL_TaskSleep(50);
+    mcu_printf("[ADXL345] I2C Initialized\n");
+    
+    // 전체 I2C 스캔
+    mcu_printf("[ADXL345] Scanning I2C bus...\n");
+    uint8 found = 0;
+    
+    for(uint8 addr = 0x08; addr <= 0x77; addr++) {
+        uint8 dummy = 0x00;
+        I2CXfer_t xfer = {0};
+        xfer.xCmdBuf = &dummy;
+        xfer.xCmdLen = 1;
+        
+        if(I2C_XferCmd((uint8)ADXL345_I2C_CH, (uint8)(addr << 1), xfer, 0) == SAL_RET_SUCCESS) {
+            mcu_printf("  [I2C] Device found at 0x%02X\n", addr);
+            found++;
+        }
+    }
+    
+    if(found == 0) {
+        mcu_printf("  [WARNING] No I2C devices detected!\n");
+        mcu_printf("  Hardware Check:\n");
+        mcu_printf("    1. ADXL345 VCC → 3.3V (NOT 5V!)\n");
+        mcu_printf("    2. ADXL345 GND → GND\n");
+        mcu_printf("    3. ADXL345 SCL → GPB0 (left side of board)\n");
+        mcu_printf("    4. ADXL345 SDA → GPB1 (left side of board)\n");
+        mcu_printf("    5. ADXL345 CS  → 3.3V (I2C mode)\n");
+        mcu_printf("    6. ADXL345 SDO → GND (address 0x53)\n");
+    }
 
-    GPSB_CsInit(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-
-    SAL_TaskSleep(10); 
+    initialized = 1;
     return SAL_RET_SUCCESS;
 }
-SALRetCode_t ADXL345_Test_ReadID(uint8 *devid) {
-    uint8 tx_buf[2] = { ADXL345_SPI_READ | ADXL345_REG_DEVID, 0x00 };
-    uint8 rx_buf[2] = { 0 };
-    SALRetCode_t ret;
 
-    GPSB_CsActivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    ret = GPSB_Xfer(ADXL345_CHANNEL, tx_buf, rx_buf, 2, GPSB_XFER_MODE_WITHOUT_INTERRUPT);
-    GPSB_CsDeactivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    SAL_TaskSleep(1);
+SALRetCode_t ADXL345_Test_ReadID(uint8 *devid)
+{
+    uint8 cmd = ADXL345_REG_DEVID;
+    uint8 data = 0;
+    I2CXfer_t xfer = {0};
 
-    mcu_printf("[ADXL345] ReadID TX:%02X %02X RX:%02X %02X\n",
-               tx_buf[0], tx_buf[1], rx_buf[0], rx_buf[1]);
+    xfer.xCmdBuf = &cmd;
+    xfer.xCmdLen = 1;
+    xfer.xInBuf = &data;
+    xfer.xInLen = 1;
 
-    *devid = rx_buf[1];
+    SALRetCode_t ret = I2C_XferCmd((uint8)ADXL345_I2C_CH, ADXL345_I2C_Addr(), xfer, 0);
+
+    *devid = data;
     return ret;
 }
 
-/* 가속도계 레지스터 쓰기 */
-SALRetCode_t ADXL345_WriteReg(uint8 sensor_id, uint8 reg, uint8 val) {
-    uint8 tx[2];
-    SALRetCode_t ret;
+SALRetCode_t ADXL345_ReadReg(uint8 sensor_id, uint8 reg, uint8 *val)
+{
+    uint8 cmd = reg;
+    uint8 data = 0;
+    I2CXfer_t xfer = {0};
 
-    tx[0] = reg; // Write 모드는 MSB가 0
-    tx[1] = val;
+    xfer.xCmdBuf = &cmd;
+    xfer.xCmdLen = 1;
+    xfer.xInBuf = &data;
+    xfer.xInLen = 1;
 
-    GPSB_CsActivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    ret = GPSB_Xfer(ADXL345_CHANNEL, tx, NULL, 2, GPSB_XFER_MODE_WITHOUT_INTERRUPT);
-    GPSB_CsDeactivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    SAL_TaskSleep(1);
-
-    return ret;
-}
-
-/* 가속도 데이터 읽기 및 단위 변환 */
-SALRetCode_t ADXL345_ReadAccel(uint8 sensor_id, float *x, float *y, float *z) {
-    uint8 tx[7] = {0,};
-    uint8 rx[7] = {0,};
-    int16 raw_x, raw_y, raw_z;
-    SALRetCode_t ret;
-
-    // Multi-byte Read 비트(0x40)와 Read 비트(0x80)를 함께 설정
-    tx[0] = ADXL345_SPI_READ | ADXL345_SPI_MB | ADXL345_REG_DATAX0;
-
-    GPSB_CsActivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    // 주소 1바이트 + 데이터 6바이트 = 총 7바이트 트랜잭션
-    ret = GPSB_Xfer(ADXL345_CHANNEL, tx, rx, 7, GPSB_XFER_MODE_WITHOUT_INTERRUPT);
-    GPSB_CsDeactivate(ADXL345_CHANNEL, ADXL345_CS0_GPIO, FALSE);
-    SAL_TaskSleep(1);
-
-    mcu_printf("[ADXL345] ReadAccel TX:%02X %02X %02X %02X %02X %02X %02X RX:%02X %02X %02X %02X %02X %02X %02X\n",
-               tx[0], tx[1], tx[2], tx[3], tx[4], tx[5], tx[6],
-               rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6]);
-
-    if(ret == SAL_RET_SUCCESS) {
-        // ADXL345 데이터는 Little Endian (LSB, MSB 순)
-        // rx[0]은 주소 전송 시 받은 쓰레기값이므로 rx[1]부터 처리
-        raw_x = (int16)((rx[2] << 8) | rx[1]);
-        raw_y = (int16)((rx[4] << 8) | rx[3]);
-        raw_z = (int16)((rx[6] << 8) | rx[5]);
-
-        // Full-res 모드 scale factor: 3.9mg/LSB
-        const float factor = 0.0039f * 9.80665f;
-        if(x) *x = (float)raw_x * factor;
-        if(y) *y = (float)raw_y * factor;
-        if(z) *z = (float)raw_z * factor;
+    SALRetCode_t ret = I2C_XferCmd((uint8)ADXL345_I2C_CH, ADXL345_I2C_Addr(), xfer, 0);
+    if (ret != SAL_RET_SUCCESS) {
+        mcu_printf("[ADXL345] ReadReg fail reg=0x%02X ret=%d\n", reg, ret);
+    }
+    if (val) {
+        *val = data;
     }
 
+    (void)sensor_id;
+    return ret;
+}
+
+SALRetCode_t ADXL345_WriteReg(uint8 sensor_id, uint8 reg, uint8 val)
+{
+    uint8 cmd = reg;
+    uint8 data = val;
+    I2CXfer_t xfer = {0};
+
+    xfer.xCmdBuf = &cmd;
+    xfer.xCmdLen = 1;
+    xfer.xOutBuf = &data;
+    xfer.xOutLen = 1;
+
+    SALRetCode_t ret = I2C_XferCmd((uint8)ADXL345_I2C_CH, ADXL345_I2C_Addr(), xfer, 0);
+    if (ret != SAL_RET_SUCCESS) {
+        mcu_printf("[ADXL345] WriteReg fail reg=0x%02X val=0x%02X ret=%d\n", reg, val, ret);
+    }
+
+    (void)sensor_id;
+    return ret;
+}
+
+SALRetCode_t ADXL345_ReadAccel(uint8 sensor_id, float *x, float *y, float *z)
+{
+    uint8 cmd = ADXL345_REG_DATAX0;
+    uint8 rx[6] = {0};
+    I2CXfer_t xfer = {0};
+
+    xfer.xCmdBuf = &cmd;
+    xfer.xCmdLen = 1;
+    xfer.xInBuf = rx;
+    xfer.xInLen = 6;
+
+    SALRetCode_t ret = I2C_XferCmd((uint8)ADXL345_I2C_CH, ADXL345_I2C_Addr(), xfer, 0);
+
+    if (ret == SAL_RET_SUCCESS) {
+        int16 raw_x = (int16)((rx[1] << 8) | rx[0]);
+        int16 raw_y = (int16)((rx[3] << 8) | rx[2]);
+        int16 raw_z = (int16)((rx[5] << 8) | rx[4]);
+
+        const float factor = 0.0039f * 9.80665f;
+        if (x) *x = (float)raw_x * factor;
+        if (y) *y = (float)raw_y * factor;
+        if (z) *z = (float)raw_z * factor;
+    }
+
+    } else {
+        mcu_printf("[ADXL345] ReadAccel fail ret=%d\n", ret);
+    }
+
+    (void)sensor_id;
     return ret;
 }

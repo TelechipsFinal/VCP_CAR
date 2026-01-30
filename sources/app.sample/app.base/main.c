@@ -32,6 +32,7 @@
 #include <servo_control.h>
 #include <ADXL345_test.h>
 #include <ADXL345.h>
+#include <i2c.h>
 
 
 #if (APLT_LINUX_SUPPORT_SPI_DEMO == 1)
@@ -463,23 +464,36 @@ void Main_StartTask(void * pArg)
     // } else {
     //     mcu_printf("[ERROR] IMU Init Failed\n");
     // }
+// ✅ I2C 초기화 (I2C2 CH_0)
+if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
+    mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
+} else {
+    mcu_printf("[ERROR] ADXL345 I2C Init Failed\n");
+}
 
-// 2. ADXL345 (CS0/GPC8) 초기화 및 하드웨어 체크
-    // 앞서 만든 ADXL345_Test_Init()을 사용하여 GPC 핀들을 설정합니다.
-    if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] ADXL345 Hardware/GPIO Configured\n");
-        
-        // 하드웨어 ID(0xE5) 확인 시도
-        uint8 devid = 0;
-        if(ADXL345_Test_ReadID(&devid) == SAL_RET_SUCCESS) {
-            mcu_printf("[SYSTEM] ADXL345 Detected! ID: 0x%02X\n", devid);
-        } else {
-            mcu_printf("[WARNING] ADXL345 ID Mismatch or Not Found (0x%02X)\n", devid);
-        }
+if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
+    mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
+    
+    // ✅ I2C 클럭 상태 확인
+    uint32 i2c_clk = CLOCK_GetPeriRate((sint32)CLOCK_PERI_I2C2);
+    mcu_printf("[DEBUG] I2C Clock: %d Hz\n", i2c_clk);
+    
+    // ✅ GPIO 기능 확인
+    mcu_printf("[DEBUG] Checking GPIO settings...\n");
+    mcu_printf("  (SCL): Expected=INPUT+FUNC2\n");
+    mcu_printf("  (SDA): Expected=INPUT+FUNC2\n");
+}
+
+// ✅ I2C Scan (선택사항 - 디버깅용)
+{
+    mcu_printf("[I2C] Scanning I2C bus...\n");
+    uint32 found_addr = I2C_ScanSlave((uint8)ADXL345_I2C_CH);
+    if(found_addr > 0) {
+        mcu_printf("[I2C] Device found at 0x%02X\n", found_addr);
     } else {
-        mcu_printf("[ERROR] ADXL345 Hardware Init Failed\n");
+        mcu_printf("[I2C] No devices found\n");
     }
-
+}
     
    // Create application tasks
     AppTaskCreate();
