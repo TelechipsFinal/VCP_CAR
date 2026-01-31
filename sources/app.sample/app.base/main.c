@@ -467,12 +467,6 @@ void Main_StartTask(void * pArg)
 // ✅ I2C 초기화 (I2C2 CH_0)
 if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
-} else {
-    mcu_printf("[ERROR] ADXL345 I2C Init Failed\n");
-}
-
-if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
-    mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
     
     // ✅ I2C 클럭 상태 확인
     uint32 i2c_clk = CLOCK_GetPeriRate((sint32)CLOCK_PERI_I2C2);
@@ -484,16 +478,7 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     mcu_printf("  (SDA): Expected=INPUT+FUNC2\n");
 }
 
-// ✅ I2C Scan (선택사항 - 디버깅용)
-{
-    mcu_printf("[I2C] Scanning I2C bus...\n");
-    uint32 found_addr = I2C_ScanSlave((uint8)ADXL345_I2C_CH);
-    if(found_addr > 0) {
-        mcu_printf("[I2C] Device found at 0x%02X\n", found_addr);
-    } else {
-        mcu_printf("[I2C] No devices found\n");
-    }
-}
+// ✅ I2C Scan disabled to avoid disturbing bus during sensor init
     
    // Create application tasks
     AppTaskCreate();
@@ -512,7 +497,7 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     //     mcu_printf("[SYSTEM] Safety Task Created (Priority: %d, 100Hz)\n", SAFETY_TASK_PRIO);
     // }
     
-    // // Task 1: CAN RX (Event-driven)
+    // // Task 1: CAN RX (Event-driven) 
     // err = SAL_TaskCreate(&gCANRxTaskID,
     //                     (const uint8 *)"CAN_RX",
     //                     (SALTaskFunc)&CAN_RX_Task,
