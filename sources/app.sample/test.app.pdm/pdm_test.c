@@ -22,7 +22,10 @@
 #include "sal_internal.h"
 #include "bsp.h"
 #include "pmio.h"
+<<<<<<< HEAD
 #include "motor_drive.h"
+=======
+>>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
 
 /*
 ***************************************************************************************************
@@ -409,12 +412,15 @@ void PDM_SelectTestCase
             break;
         }
 
+<<<<<<< HEAD
         case    5:
         {
             MotorDrive_L298NTest();
             break;
         }
 
+=======
+>>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
         default :
         {
             mcu_printf("\n== Invaild Test Case ==\n");
@@ -426,3 +432,7 @@ void PDM_SelectTestCase
 }
 
 #endif  // ( MCU_BSP_SUPPORT_TEST_APP_PDM == 1 )
+<<<<<<< HEAD
+=======
+
+>>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81

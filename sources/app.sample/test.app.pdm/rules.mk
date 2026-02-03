@@ -24,4 +24,8 @@ INCLUDES += -I$(MCU_BSP_APP_SAMPLE_PDM_TEST_PATH)
 
 # Sources
 SRCS += pdm_test.c
+<<<<<<< HEAD
 SRCS += motor_drive.c
+=======
+
+>>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
