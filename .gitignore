@@ -1,2 +1,32 @@
-.repo/
-images/
+# --- Build Artifacts ---
+# 빌드 결과물 전체 폴더 제외
+build/
+output/
+bin/
+obj/
+
+# --- Compiled Files ---
+# 특정 확장자 제외 (이미 빌드된 바이너리들)
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.map
+*.rom
+*.signed
+*.log
+*.tmp
+
+# --- System & Tools ---
+# OS 및 툴 설정 파일
+.vscode/
+.eula_accepted
+.nfs*
+*~
+
+# --- Yocto / BitBake Specific ---
+# 요크토 빌드 시 생성되는 임시 파일들
+downloads/
+sstate-cache/
+tmp/
