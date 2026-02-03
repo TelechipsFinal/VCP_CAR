@@ -10,179 +10,172 @@
 
 #define IMPACT_THRESHOLD_G  (2.0f)
 
-static SALRetCode_t ADXL345_ReadRegStable(uint8 reg, uint8 *val);
-static SALRetCode_t ADXL345_WriteVerify(uint8 reg, uint8 val, uint8 retries, uint32 delay_ms);
-static void ADXL_Test_Calibration(void);
-static SALRetCode_t ADXL345_ReadRegStable(uint8 reg, uint8 *val)
-{
-    uint8 a = 0;
-    uint8 b = 0;
-    uint8 retry;
+static SALRetCode_t ADXL345_ReadRegStable(uint8 dev, uint8 reg, uint8 *val);
+static SALRetCode_t ADXL345_WriteVerify(uint8 dev, uint8 reg, uint8 val, uint8 retries, uint32 delay_ms);
 
-    for (retry = 0; retry < 5; retry++) {
-        SALRetCode_t ra = ADXL345_ReadReg(0, reg, &a);
-        if (ra != SAL_RET_SUCCESS) {
-            SAL_TaskSleep(2);
-            continue;
-        }
-        SALRetCode_t rb = ADXL345_ReadReg(0, reg, &b);
-        if (rb != SAL_RET_SUCCESS) {
-            SAL_TaskSleep(2);
-            continue;
-        }
-        if (a == b) {
-            if (val) {
-                *val = a;
-            }
-            return SAL_RET_SUCCESS;
-        }
+
+static SALRetCode_t ADXL345_ReadRegStable(uint8 dev, uint8 reg, uint8 *val)
+{
+    uint8 a=0,b=0;
+    for (uint8 retry=0; retry<5; retry++) {
+        if (ADXL345_ReadReg(dev, reg, &a) != SAL_RET_SUCCESS) { SAL_TaskSleep(2); continue; }
+        if (ADXL345_ReadReg(dev, reg, &b) != SAL_RET_SUCCESS) { SAL_TaskSleep(2); continue; }
+        if (a==b) { if(val) *val=a; return SAL_RET_SUCCESS; }
         SAL_TaskSleep(2);
     }
-
-    if (val) {
-        *val = b;
-    }
-    mcu_printf("  [WARN] Unstable reg 0x%02X (last=0x%02X)\n", reg, b);
+    if(val) *val=b;
+    mcu_printf("  [WARN] ADXL%d unstable reg 0x%02X (last=0x%02X)\n", dev, reg, b);
     return SAL_RET_SUCCESS;
 }
-static SALRetCode_t ADXL345_WriteVerify(uint8 reg, uint8 val, uint8 retries, uint32 delay_ms)
-{
-    uint8 readback = 0;
-    uint8 i;
 
-    for (i = 0; i < retries; i++) {
-        ADXL345_WriteReg(0, reg, val);
+static SALRetCode_t ADXL345_WriteVerify(uint8 dev, uint8 reg, uint8 val, uint8 retries, uint32 delay_ms)
+{
+    uint8 readback=0;
+    for (uint8 i=0; i<retries; i++) {
+        (void)ADXL345_WriteReg(dev, reg, val);
         SAL_TaskSleep(delay_ms);
-        if (ADXL345_ReadRegStable(reg, &readback) == SAL_RET_SUCCESS && readback == val) {
+        if (ADXL345_ReadRegStable(dev, reg, &readback)==SAL_RET_SUCCESS && readback==val) {
             return SAL_RET_SUCCESS;
         }
         SAL_TaskSleep(5);
     }
-
     return SAL_RET_FAILED;
 }
 
-/*
- * ADXL345 검증 메인 태스크
- */void ADXL345_Test_Task(void *pArg) 
+void ADXL345_Test_Task(void *pArg)
 {
     (void)pArg;
+
     uint8 devid = 0;
-    uint8 retry = 0;
-    uint8 reg = 0;
-    uint8 reg_before = 0;
-    uint8 reg_after = 0;
-    uint8 reg_late1 = 0;
-    uint8 reg_late2 = 0;
+    uint8 dev, retry;
+    uint8 reg_before = 0, reg_after = 0;
     uint8 burst[6] = {0};
-    
+
     mcu_printf("\n╔════════════════════════════════════╗\n");
-    mcu_printf("║   ADXL345 Test Task Started        ║\n");
+    mcu_printf("║   ADXL345 x4 (TCA9548A) Test Start ║\n");
     mcu_printf("╚════════════════════════════════════╝\n\n");
-    
-    SAL_TaskSleep(100);
-
-    /* ========== TEST 1: Device ID ========== */
-    mcu_printf("[TEST 1] Device ID Check\n");
-    mcu_printf("=========================================\n");
-
-    for(retry = 0; retry < 5; retry++) {
-        if(ADXL345_Test_ReadID(&devid) == SAL_RET_SUCCESS) {
-            if(devid == ADXL345_DEVICE_ID) {
-                break;
-            }
-        }
-        mcu_printf("  Retry %d/5... (Read: 0x%02X)\n", retry + 1, devid);
-        SAL_TaskSleep(200);
-    }
-
-    if(devid != ADXL345_DEVICE_ID) {
-        mcu_printf("  [FATAL] Sensor Not Responding!\n");
-        mcu_printf("  Expected: 0xE5, Got: 0x%02X\n", devid);
-        mcu_printf("  Check:\n");
-        mcu_printf("    - I2C Pins: SCL=GPB0, SDA=GPB1\n");
-        mcu_printf("    - I2C Channel: %d, Port: %d\n", ADXL345_I2C_CH, ADXL345_I2C_PORT);
-        mcu_printf("    - I2C Addr: 0x%02X (7-bit)\n", ADXL345_I2C_ADDR_7BIT);
-        mcu_printf("    - Hardware connections\n");
-        SAL_TaskDelete(0);
-        return;
-    }
-
-    mcu_printf("  [SUCCESS] ADXL345 Verified (ID: 0xE5)\n\n");
-
-    /* ========== 센서 초기화 ========== */
-    mcu_printf("[ADXL345] Configuring Sensor...\n");
-    (void)ADXL345_ReadRegStable(ADXL345_REG_DATA_FORMAT, &reg_before);
-    mcu_printf("  DATA_FORMAT before write: 0x%02X\n", reg_before);
-
-    (void)ADXL345_WriteVerify(ADXL345_REG_BW_RATE, 0x0A, 3, 10);
-    (void)ADXL345_WriteVerify(ADXL345_REG_DATA_FORMAT, 0x09, 3, 10);
-    (void)ADXL345_WriteVerify(ADXL345_REG_POWER_CTL, 0x08, 3, 20);
-    SAL_TaskSleep(50);
-
-    (void)ADXL345_ReadRegStable(ADXL345_REG_DATA_FORMAT, &reg_after);
-    mcu_printf("  DATA_FORMAT after write:  0x%02X (expected 0x09)\n", reg_after);
 
     SAL_TaskSleep(100);
-    (void)ADXL345_ReadRegStable(ADXL345_REG_DATA_FORMAT, &reg_late1);
-    SAL_TaskSleep(900);
-    (void)ADXL345_ReadRegStable(ADXL345_REG_DATA_FORMAT, &reg_late2);
-    mcu_printf("  DATA_FORMAT +100ms:       0x%02X\n", reg_late1);
-    mcu_printf("  DATA_FORMAT +1000ms:      0x%02X\n", reg_late2);
-    if ((reg_after != 0x09) || (reg_late1 != reg_after) || (reg_late2 != reg_after)) {
-        mcu_printf("  [WARN] DATA_FORMAT changed after config. Possible overwrite.\n");
-    }
-    mcu_printf("[ADXL345] Configuration Complete\n\n");
-    
-    /* ========== 테스트 실행 ========== */
 
-
-    ADXL_Test_Calibration();
-
-    mcu_printf("[TEST 2] Register Readback\n");
-    mcu_printf("=========================================\n");
-    if (ADXL345_ReadRegsBurst(0, ADXL345_REG_BW_RATE, burst, sizeof(burst)) == SAL_RET_SUCCESS) {
-        mcu_printf("  BURST 0x2C-0x31: %02X %02X %02X %02X %02X %02X\n",
-                   burst[0], burst[1], burst[2], burst[3], burst[4], burst[5]);
-    } else {
-        mcu_printf("  [ERROR] BURST read failed\n");
-    }
-    if (ADXL345_ReadRegStable(ADXL345_REG_BW_RATE, &reg) == SAL_RET_SUCCESS) {
-        mcu_printf("  BW_RATE: 0x%02X (expected 0x0A)\n", reg);
-    }
-    for (retry = 0; retry < 5; retry++) {
-        if (ADXL345_ReadRegStable(ADXL345_REG_DATA_FORMAT, &reg) == SAL_RET_SUCCESS) {
-            mcu_printf("  DATA_FORMAT: 0x%02X (expected 0x09)\n", reg);
-            if (reg == 0x09) {
-                break;
-            }
+    /* ========== TEST 0: MUX sanity (optional) ========== */
+    mcu_printf("[MUX] Selecting CH0..CH3\n");
+    for (dev = 0; dev < ADXL_COUNT; dev++) {
+        if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
+            mcu_printf("  [FATAL] MUX select failed for ADXL%d (ch=%d)\n", dev, g_adxl_mux_ch[dev]);
+            SAL_TaskDelete(0);
+            return;
         }
         SAL_TaskSleep(5);
     }
-    if (ADXL345_ReadRegStable(ADXL345_REG_POWER_CTL, &reg) == SAL_RET_SUCCESS) {
-        mcu_printf("  POWER_CTL: 0x%02X (expected 0x08)\n", reg);
-    }
+    mcu_printf("  [OK] MUX channel switch OK\n\n");
 
-    mcu_printf("\n[TEST 3] Single Read (with retry)\n");
+    /* ========== TEST 1: Device ID for all sensors ========== */
+    mcu_printf("[TEST 1] Device ID Check (ADXL0~3)\n");
     mcu_printf("=========================================\n");
-    for (retry = 0; retry < 3; retry++) {
-        if (ADXL_Test_SingleRead() == SAL_RET_SUCCESS) {
-            break;
+
+    for (dev = 0; dev < ADXL_COUNT; dev++) {
+        devid = 0;
+
+        for (retry = 0; retry < 5; retry++) {
+            /* 채널 선택 후 ID 읽기 */
+            if (ADXL_MuxSelectByDev(dev) == SAL_RET_SUCCESS) {
+                if (ADXL345_Test_ReadID(&devid) == SAL_RET_SUCCESS && devid == ADXL345_DEVICE_ID) {
+                    break;
+                }
+            }
+            mcu_printf("  [ADXL%d] Retry %d/5... (Read: 0x%02X)\n", dev, retry + 1, devid);
+            SAL_TaskSleep(100);
         }
-        mcu_printf("  Retry %d/3...\n", retry + 1);
-        SAL_TaskSleep(100);
+
+        if (devid != ADXL345_DEVICE_ID) {
+            mcu_printf("  [FATAL][ADXL%d] Not Responding! (Got 0x%02X)\n", dev, devid);
+            mcu_printf("    - Check wiring on MUX CH%d\n", g_adxl_mux_ch[dev]);
+            SAL_TaskDelete(0);
+            return;
+        }
+
+        mcu_printf("  [OK][ADXL%d] ID=0x%02X\n", dev, devid);
     }
 
-    ADXL_Test_Continuous(5000);
+    mcu_printf("\n");
 
-    ADXL_Test_ImpactDetection(10000);
+    /* ========== TEST 2: Configure all sensors ========== */
+    mcu_printf("[TEST 2] Configure (BW_RATE/DATA_FORMAT/POWER_CTL)\n");
+    mcu_printf("=========================================\n");
+
+    for (dev = 0; dev < ADXL_COUNT; dev++) {
+        (void)ADXL345_ReadRegStable(dev, ADXL345_REG_DATA_FORMAT, &reg_before);
+
+        (void)ADXL345_WriteVerify(dev, ADXL345_REG_BW_RATE,      0x0A, 3, 10);
+        (void)ADXL345_WriteVerify(dev, ADXL345_REG_DATA_FORMAT,  0x09, 3, 10);
+        (void)ADXL345_WriteVerify(dev, ADXL345_REG_POWER_CTL,    0x08, 3, 20);
+        SAL_TaskSleep(20);
+
+        (void)ADXL345_ReadRegStable(dev, ADXL345_REG_DATA_FORMAT, &reg_after);
+
+        mcu_printf("  [ADXL%d] DATA_FORMAT: 0x%02X -> 0x%02X (exp 0x09)\n",
+                   dev, reg_before, reg_after);
+
+        if (ADXL345_ReadRegsBurst(dev, ADXL345_REG_BW_RATE, burst, sizeof(burst)) == SAL_RET_SUCCESS) {
+            mcu_printf("  [ADXL%d] BURST 0x2C-0x31: %02X %02X %02X %02X %02X %02X\n",
+                       dev, burst[0], burst[1], burst[2], burst[3], burst[4], burst[5]);
+        } else {
+            mcu_printf("  [ADXL%d] [ERROR] BURST read failed\n", dev);
+        }
+    }
+
+    mcu_printf("\n");
+
+    /* ========== TEST 3: Live read all sensors for 5 seconds ========== */
+    mcu_printf("[TEST 3] Live Read ADXL0~3 (5 sec)\n");
+    mcu_printf("=========================================\n");
+
+    {
+        uint32 start, now;
+        float x, y, z;
+
+        SAL_GetTickCount(&start);
+
+        // TEST 3 부분 수정
+while (1) {
+    SAL_GetTickCount(&now);
+    if ((now - start) >= 5000U) break;
+
+    for (dev = 0; dev < ADXL_COUNT; dev++) {
+        if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
+            mcu_printf("  [ADXL%d] MUX select failed\n", dev);
+            continue;
+        }
+
+        // ✅ ReadAccelCalibrated 사용
+        if (ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
+            float mag = sqrtf((x*x) + (y*y) + (z*z));
+            mcu_printf("  [%4d ms][ADXL%d] X:", (int)(now - start), dev);
+            Print_Float_Value(x, 100);
+            mcu_printf(" Y:");
+            Print_Float_Value(y, 100);
+            mcu_printf(" Z:");
+            Print_Float_Value(z, 100);
+            mcu_printf(" |A|:");
+            Print_Float_Value(mag, 100);
+            mcu_printf(" m/s^2\n");
+        } else {
+            mcu_printf("  [%4d ms][ADXL%d] [ERROR] ReadAccel failed\n",
+                       (int)(now - start), dev);
+        }
+    }
+
+    SAL_TaskSleep(50);
+}
+    }
 
     mcu_printf("\n╔════════════════════════════════════╗\n");
-    mcu_printf("║   All Tests Finished!              ║\n");
+    mcu_printf("║   ADXL345 x4 Test Finished!        ║\n");
     mcu_printf("╚════════════════════════════════════╝\n");
 
     SAL_TaskDelete(0);
 }
+
 
 /* 단일 읽기 테스트 */
 SALRetCode_t ADXL_Test_SingleRead(void) 
@@ -279,7 +272,8 @@ SALRetCode_t ADXL_Test_SingleRead(void)
     
     mcu_printf("  Total Impacts: %d\n", impacts);
     return SAL_RET_SUCCESS;
-}static void ADXL_Test_Calibration(void)
+}
+void ADXL_Test_Calibration(uint8 dev)
 {
     SALRetCode_t ret;
     ADXL345_Calibration_t cal;
@@ -287,13 +281,10 @@ SALRetCode_t ADXL_Test_SingleRead(void)
     uint8 i;
 
     mcu_printf("\n");
-    mcu_printf("lqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqk\n");
-    mcu_printf("x   CALIBRATION TEST                 x\n");
-    mcu_printf("mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj\n");
+    mcu_printf("╔════════════════════════════════════╗\n");
+    mcu_printf("║   CALIBRATION TEST                 ║\n");
+    mcu_printf("╚════════════════════════════════════╝\n");
     mcu_printf("\n");
-
-    mcu_printf("[BEFORE CALIBRATION]\n");
-    mcu_printf("=========================================\n");
     
     for (i = 0; i < 5; i++) {
         ret = ADXL345_ReadAccel(0, &x, &y, &z);

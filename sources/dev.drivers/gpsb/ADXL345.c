@@ -9,7 +9,11 @@
 static uint32 g_adxl345_i2c_sem;
 static uint8 g_adxl345_i2c_sem_init = 0;
 static const uint8 g_adxl345_i2c_sem_name[] = "ADXL345_I2C";
-static ADXL345_Calibration_t g_adxl345_cal[4] = {0};  // 최대 4개 센서 지원
+ADXL345_Calibration_t g_adxl345_cal[4] = {0};  // 최대 4개 센서 지원
+const uint8 g_adxl_mux_ch[ADXL_COUNT] = { 0, 1, 2, 3 }; // ADXL0~3 -> MUX CH0~3
+
+static SALRetCode_t ADXL345_SelectBySensor(uint8 sensor_id);
+
 
 static uint8 ADXL345_I2C_Addr(void)
 {
@@ -44,7 +48,6 @@ static SALRetCode_t ADXL345_I2C_Xfer(I2CXfer_t xfer)
 
     return ret;
 }
-
 SALRetCode_t ADXL345_Test_Init(void)
 {
     static uint8 initialized = 0;
@@ -74,13 +77,19 @@ SALRetCode_t ADXL345_Test_Init(void)
     }
 
     SAL_TaskSleep(50);
-    mcu_printf("[ADXL345] I2C Initialized\n");
+    mcu_printf("[ADXL345] I2C Initialized\n\n");
+
+    /* ===== 4개 센서 동시 캘리브레이션 ===== */
+    ret = ADXL345_CalibrateAll(200);  // 200 samples = 약 2초
+    
+    if (ret != SAL_RET_SUCCESS) {
+        mcu_printf("[ADXL345] Calibration Failed!\n");
+    }
 
     initialized = 1;
     return SAL_RET_SUCCESS;
 }
 
-// ✅ Device ID는 xCmdBuf 방식 유지 (작동하므로)
 SALRetCode_t ADXL345_Test_ReadID(uint8 *devid)
 {
     uint8 cmd = ADXL345_REG_DEVID;
@@ -98,31 +107,35 @@ SALRetCode_t ADXL345_Test_ReadID(uint8 *devid)
     *devid = data;
     return ret;
 }
-
-// ✅ 완전 분리 트랜잭션 (Write → 딜레이 → Read)
 SALRetCode_t ADXL345_ReadReg(uint8 sensor_id, uint8 reg, uint8 *val)
 {
     I2CXfer_t xfer = {0};
     uint8 data = 0;
     SALRetCode_t ret;
 
-    // Step 1: Write register address (완전 독립 트랜잭션)
+    // MUX 선택
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret != SAL_RET_SUCCESS) {
+        return ret;
+    }
+
+    // Step 1: Write register address
     xfer.xCmdBuf = NULL;
     xfer.xCmdLen = 0;
     xfer.xOutBuf = &reg;
     xfer.xOutLen = 1;
     xfer.xInBuf = NULL;
     xfer.xInLen = 0;
-    xfer.xOpt = 0;  // STOP 포함
+    xfer.xOpt = 0;
 
     ret = ADXL345_I2C_Xfer(xfer);
     if (ret != SAL_RET_SUCCESS) {
         return ret;
     }
 
-    SAL_TaskSleep(2);  // ✅ ADXL345 안정화 대기
+    SAL_TaskSleep(2);
 
-    // Step 2: Read data (새로운 START)
+    // Step 2: Read data
     xfer.xCmdBuf = NULL;
     xfer.xCmdLen = 0;
     xfer.xOutBuf = NULL;
@@ -137,14 +150,18 @@ SALRetCode_t ADXL345_ReadReg(uint8 sensor_id, uint8 reg, uint8 *val)
         *val = data;
     }
 
-    (void)sensor_id;
     return ret;
 }
-
 SALRetCode_t ADXL345_ReadRegsBurst(uint8 sensor_id, uint8 start_reg, uint8 *buf, uint8 len)
 {
     I2CXfer_t xfer = {0};
     SALRetCode_t ret;
+
+    // MUX 선택
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret != SAL_RET_SUCCESS) {
+        return ret;
+    }
 
     // Step 1: Write register address
     xfer.xCmdBuf = NULL;
@@ -176,7 +193,6 @@ SALRetCode_t ADXL345_ReadRegsBurst(uint8 sensor_id, uint8 start_reg, uint8 *buf,
         mcu_printf("[ADXL345] ReadBurst fail reg=0x%02X len=%d ret=%d\n", start_reg, len, ret);
     }
 
-    (void)sensor_id;
     return ret;
 }
 
@@ -184,6 +200,13 @@ SALRetCode_t ADXL345_WriteReg(uint8 sensor_id, uint8 reg, uint8 val)
 {
     I2CXfer_t xfer = {0};
     uint8 buf[2];
+    SALRetCode_t ret;
+
+    // MUX 선택
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret != SAL_RET_SUCCESS) {
+        return ret;
+    }
 
     buf[0] = reg;
     buf[1] = val;
@@ -196,21 +219,25 @@ SALRetCode_t ADXL345_WriteReg(uint8 sensor_id, uint8 reg, uint8 val)
     xfer.xInLen = 0;
     xfer.xOpt = 0;
 
-    SALRetCode_t ret = ADXL345_I2C_Xfer(xfer);
+    ret = ADXL345_I2C_Xfer(xfer);
     if (ret != SAL_RET_SUCCESS) {
         mcu_printf("[ADXL345] WriteReg fail reg=0x%02X val=0x%02X ret=%d\n", reg, val, ret);
     }
 
-    (void)sensor_id;
     return ret;
 }
-
 SALRetCode_t ADXL345_ReadAccel(uint8 sensor_id, float *x, float *y, float *z)
 {
     I2CXfer_t xfer = {0};
     uint8 cmd = ADXL345_REG_DATAX0;
     uint8 rx[6] = {0};
     SALRetCode_t ret;
+
+    // MUX 선택
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret != SAL_RET_SUCCESS) {
+        return ret;
+    }
 
     // Step 1: Write register address
     xfer.xCmdBuf = NULL;
@@ -250,16 +277,20 @@ SALRetCode_t ADXL345_ReadAccel(uint8 sensor_id, float *x, float *y, float *z)
         if (z) *z = (float)raw_z * factor;
     }
 
-    (void)sensor_id;
     return ret;
 }
-
 SALRetCode_t ADXL345_ReadRaw(uint8 sensor_id, int16 *x, int16 *y, int16 *z)
 {
     I2CXfer_t xfer = {0};
     uint8 cmd = ADXL345_REG_DATAX0;
     uint8 rx[6] = {0};
     SALRetCode_t ret;
+
+    // MUX 선택
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret != SAL_RET_SUCCESS) {
+        return ret;
+    }
 
     // Step 1: Write register address
     xfer.xCmdBuf = NULL;
@@ -293,7 +324,6 @@ SALRetCode_t ADXL345_ReadRaw(uint8 sensor_id, int16 *x, int16 *y, int16 *z)
         if (z) *z = (int16)((rx[5] << 8) | rx[4]);
     }
 
-    (void)sensor_id;
     return ret;
 }
 
@@ -395,6 +425,100 @@ SALRetCode_t ADXL345_ReadRaw(uint8 sensor_id, int16 *x, int16 *y, int16 *z)
 
 /*
 ***************************************************************************************************
+*                                          ADXL345_CalibrateAll
+*
+* Function to calibrate all sensors simultaneously (interleaved sampling)
+*
+* @param    samples [in]    : Number of samples per sensor (recommended: 100-500)
+* @return   SAL_RET_SUCCESS or SAL_RET_FAILED
+* Notes
+*           - Much faster than calibrating sensors one by one
+*           - Takes approximately (samples * ADXL_COUNT * 10ms) instead of (samples * 10ms * ADXL_COUNT)
+*
+***************************************************************************************************
+*/
+SALRetCode_t ADXL345_CalibrateAll(uint16 samples)
+{
+    float sum_x[ADXL_COUNT] = {0};
+    float sum_y[ADXL_COUNT] = {0};
+    float sum_z[ADXL_COUNT] = {0};
+    uint16 valid_samples[ADXL_COUNT] = {0};
+    float x, y, z;
+    uint16 i;
+    uint8 dev;
+    SALRetCode_t ret;
+
+    mcu_printf("[ADXL345] Calibrating ALL sensors (%d samples each)...\n", samples);
+    mcu_printf("[ADXL345] Keep ALL sensors FLAT and STILL!\n");
+
+    SAL_TaskSleep(1000);
+
+    // 인터리브 샘플링: 센서 0→1→2→3→0→1→2→3...
+    for (i = 0; i < samples; i++) {
+        for (dev = 0; dev < ADXL_COUNT; dev++) {
+            ret = ADXL345_ReadAccel(dev, &x, &y, &z);
+            
+            if (ret == SAL_RET_SUCCESS) {
+                sum_x[dev] += x;
+                sum_y[dev] += y;
+                sum_z[dev] += z;
+                valid_samples[dev]++;
+            }
+        }
+
+        SAL_TaskSleep(10);  // 센서 4개 읽는데 10ms
+
+        if ((i % 50) == 0) {
+            mcu_printf(".");
+        }
+    }
+
+    mcu_printf("\n");
+
+    // 각 센서별로 캘리브레이션 파라미터 계산
+    for (dev = 0; dev < ADXL_COUNT; dev++) {
+        if (valid_samples[dev] < (samples / 2)) {
+            mcu_printf("[ADXL%d] Calibration FAILED: too few samples (%d/%d)\n", 
+                       dev, valid_samples[dev], samples);
+            continue;
+        }
+
+        float avg_x = sum_x[dev] / (float)valid_samples[dev];
+        float avg_y = sum_y[dev] / (float)valid_samples[dev];
+        float avg_z = sum_z[dev] / (float)valid_samples[dev];
+
+        g_adxl345_cal[dev].offset_x = -avg_x;
+        g_adxl345_cal[dev].offset_y = -avg_y;
+        g_adxl345_cal[dev].offset_z = -(avg_z - 9.80665f);
+
+        g_adxl345_cal[dev].scale_x = 1.0f;
+        g_adxl345_cal[dev].scale_y = 1.0f;
+        g_adxl345_cal[dev].scale_z = 1.0f;
+
+        g_adxl345_cal[dev].calibrated = 1;
+
+        mcu_printf("[ADXL%d] OK: X=", dev);
+        Print_Float_Value(avg_x, 100);
+        mcu_printf(" Y=");
+        Print_Float_Value(avg_y, 100);
+        mcu_printf(" Z=");
+        Print_Float_Value(avg_z, 100);
+        mcu_printf(" -> Offset: X=");
+        Print_Float_Value(g_adxl345_cal[dev].offset_x, 100);
+        mcu_printf(" Y=");
+        Print_Float_Value(g_adxl345_cal[dev].offset_y, 100);
+        mcu_printf(" Z=");
+        Print_Float_Value(g_adxl345_cal[dev].offset_z, 100);
+        mcu_printf("\n");
+    }
+
+    mcu_printf("[ADXL345] All sensors calibration complete!\n");
+
+    return SAL_RET_SUCCESS;
+}
+
+/*
+***************************************************************************************************
 *                                          ADXL345_GetCalibration
 *
 * Function to get current calibration parameters
@@ -480,3 +604,35 @@ SALRetCode_t ADXL345_ReadAccelCalibrated(uint8 sensor_id, float *x, float *y, fl
 
     return SAL_RET_SUCCESS;
 }
+
+static SALRetCode_t TCA9548A_SelectChannel(uint8 ch)
+{
+    I2CXfer_t xfer = {0};
+    uint8 mask = (uint8)(1U << ch);
+
+    xfer.xCmdBuf = NULL;
+    xfer.xCmdLen = 0;
+    xfer.xOutBuf = &mask;
+    xfer.xOutLen = 1;
+    xfer.xInBuf  = NULL;
+    xfer.xInLen  = 0;
+    xfer.xOpt    = 0;
+
+    /* 같은 I2C 채널/포트 사용 */
+    return I2C_Xfer((uint8)ADXL345_I2C_CH, (uint8)TCA9548A_ADDR_8BIT, xfer, 0);
+}
+
+static SALRetCode_t ADXL345_SelectBySensor(uint8 sensor_id)
+{
+    if (sensor_id >= ADXL_COUNT) return SAL_RET_FAILED;
+    return TCA9548A_SelectChannel(sensor_id);  // dev 0->ch0, 1->ch1...
+}
+
+
+SALRetCode_t ADXL_MuxSelectByDev(uint8 dev)
+{
+    if (dev >= ADXL_COUNT) return SAL_RET_FAILED;
+    return TCA9548A_SelectChannel(g_adxl_mux_ch[dev]);
+}
+
+

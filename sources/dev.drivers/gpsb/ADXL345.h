@@ -10,7 +10,7 @@
  */
 #define ADXL345_I2C_CH          (0U)              // I2C0
 #define ADXL345_I2C_PORT        (0U)              // Port 0
-#define ADXL345_I2C_SPEED_KHZ   (50U)             // 50kHz (diagnostic 안정성)
+#define ADXL345_I2C_SPEED_KHZ   (400U)             // 400kHz (diagnostic 안정성)
 #define ADXL345_I2C_SCL_GPIO    GPIO_GPB(0)       // SCL
 #define ADXL345_I2C_SDA_GPIO    GPIO_GPB(1)       // SDA
 
@@ -26,6 +26,11 @@
 #define ADXL345_DEVICE_ID       0xE5
 #define ADXL345_MEASURE         0x08
 
+/* ===== TCA9548A (I2C Mux) ===== */
+#define TCA9548A_ADDR_7BIT   (0x70)   // A0~A2에 따라 0x70~0x77
+#define TCA9548A_ADDR_8BIT   (TCA9548A_ADDR_7BIT << 1U)
+#define ADXL_COUNT  (4)
+
 // Calibration structure
 typedef struct {
     float offset_x;
@@ -37,8 +42,13 @@ typedef struct {
     uint8 calibrated;
 } ADXL345_Calibration_t;
 
+/* ===== MUX 관련 (추가) ===== */
+extern const uint8 g_adxl_mux_ch[ADXL_COUNT];  // MUX 채널 맵핑
+SALRetCode_t ADXL_MuxSelectByDev(uint8 dev);   // MUX 채널 선택
+
 // Calibration functions
 SALRetCode_t ADXL345_CalibrateOffset(uint8 sensor_id, uint16 samples);
+SALRetCode_t ADXL345_CalibrateAll(uint16 samples);  // ✅ 추가
 SALRetCode_t ADXL345_GetCalibration(uint8 sensor_id, ADXL345_Calibration_t *cal);
 SALRetCode_t ADXL345_SetCalibration(uint8 sensor_id, const ADXL345_Calibration_t *cal);
 SALRetCode_t ADXL345_ReadAccelCalibrated(uint8 sensor_id, float *x, float *y, float *z);

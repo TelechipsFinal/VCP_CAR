@@ -25,11 +25,11 @@
 #include <math.h>
 #include <pdm.h>
 #include <gpio.h>
+#include <servo_control.h>
 #include <ICM_20948.h>
 #include <kalman_filter.h>
 #include <printf_float.h>
 #include <imu_calibration.h>
-#include <servo_control.h>
 #include <ADXL345_test.h>
 #include <ADXL345.h>
 #include <i2c.h>
@@ -74,11 +74,12 @@
 
 #define SAFETY_TASK_PRIO        (SAL_PRIO_APP_CFG + 0)      // 최고 우선순위
 #define CAN_RX_TASK_PRIO        (SAL_PRIO_APP_CFG + 1)      
-#define MOTOR_TASK_PRIO         (SAL_PRIO_APP_CFG + 2)      
-#define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 3)      
-#define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 4)      
-#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 5)      // 최저 우선순위
-#define ADXL_TEST_TASK_PRIO     (SAL_PRIO_APP_CFG + 6)      // ✅ 추가
+#define MOTOR_TASK_PRIO         (SAL_PRIO_APP_CFG + 2)
+#define ADXL_MONITOR_TASK_PRIO  (SAL_PRIO_APP_CFG + 3)      // ✅ 추가
+#define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 4)      
+#define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 5)      
+#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 5)      
+
 
 // Task Stack Sizes - 극한 최소화
 #define SAFETY_TASK_STK_SIZE    (384)   // 1.5KB
@@ -111,7 +112,7 @@
 
 // Safety Thresholds
 #define ROLLOVER_GYRO_THRESHOLD     (250.0f)    // °/s
-#define ROLLOVER_ANGLE_THRESHOLD    (40.0f)     // °
+#define ROLLOVER_ANGLE_THRESHOLD    (70.0f)     // °
 #define ROLLOVER_RATE_THRESHOLD     (100.0f)    // °/s
 #define COLLISION_ACCEL_THRESHOLD   (4.0f)      // G
 #define COLLISION_DURATION_MAX      (100)       // ms
@@ -144,7 +145,7 @@ typedef struct {
 } PID_Controller_t;
 
 // PID Gains
-#define LEVELING_KP     (3.1f)
+#define LEVELING_KP     (2.0f)
 #define LEVELING_KI     (0.0f)
 #define LEVELING_KD     (0.0f)
 
@@ -161,7 +162,7 @@ typedef struct {
 #define SPEED_THRESHOLD_LOW     (30.0f)   // 30% 이하: 저속
 #define SPEED_THRESHOLD_HIGH    (70.0f)   // 70% 이상: 고속
 
-#define MAX_TILT_ANGLE 45.0f
+#define MAX_TILT_ANGLE ROLLOVER_ANGLE_THRESHOLD   
 /*
 ***************************************************************************************************
 *                                         GLOBAL VARIABLES
@@ -230,6 +231,12 @@ typedef struct {
     float height_offset;
 } Height_Data_t;
 
+typedef struct {
+    float accel_z[4];           // 각 바퀴의 Z축 가속도
+    float impact_detected[4];   // 충격 감지 (0~1)
+    uint32 last_update_time;
+} ADXL_Data_t;
+
 // Global shared variables
 static IMU_Data_t g_IMUData;
 static CAN_Data_t g_CANData;
@@ -250,8 +257,10 @@ static PID_Controller_t pid_roll;
 static PID_Controller_t pid_pitch;
 static PID_Controller_t pid_damping;
 
+static volatile uint8 g_IMU_SUSP_INIT_DONE = 0;
 
-
+static ADXL_Data_t g_ADXLData;
+static PID_Controller_t pid_damping_wheel[4];  // 각 바퀴별 댐핑 PID
 
 /*
 ***************************************************************************************************
@@ -266,6 +275,7 @@ static void Motor_Control_Task(void *pArg);
 static void IMU_Suspension_Task(void *pArg);
 static void Height_Control_Task(void *pArg);
 static void Monitoring_Task(void *pArg);
+static void ADXL345_Monitor_Task(void *pArg);  // ✅ 추가
 
 static void PID_Init(PID_Controller_t *pid, float Kp, float Ki, float Kd, float dt_ms);
 static float PID_Update(PID_Controller_t *pid, float setpoint, float measurement);
@@ -393,6 +403,7 @@ void cmain (void)
     memset(&g_ServoData, 0, sizeof(g_ServoData));
     memset(&g_SafetyData, 0, sizeof(g_SafetyData));
     memset(&g_HeightData, 0, sizeof(g_HeightData));
+    memset(&g_ADXLData, 0, sizeof(g_ADXLData));  // ✅ 추가
 
     g_CANData.suspension_enable = 1;
     g_CANData.leveling_enable = 1;
@@ -458,32 +469,30 @@ void Main_StartTask(void * pArg)
     
     mcu_printf("\n[SYSTEM] Initializing...\n");
 
-    // Initialize IMU
-    // if(ICM_20948_Init() == 0) {
-    //     mcu_printf("[SYSTEM] IMU Initialized\n");
-    // } else {
-    //     mcu_printf("[ERROR] IMU Init Failed\n");
-    // }
-// ✅ I2C 초기화 (I2C2 CH_0)
-if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
-    mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
-    
-    // ✅ I2C 클럭 상태 확인
-    uint32 i2c_clk = CLOCK_GetPeriRate((sint32)CLOCK_PERI_I2C2);
-    mcu_printf("[DEBUG] I2C Clock: %d Hz\n", i2c_clk);
-    
-    // ✅ GPIO 기능 확인
-    mcu_printf("[DEBUG] Checking GPIO settings...\n");
-    mcu_printf("  (SCL): Expected=INPUT+FUNC2\n");
-    mcu_printf("  (SDA): Expected=INPUT+FUNC2\n");
-}
+    //Initialize IMU
+    if(ICM_20948_Init() == 0) {
+        mcu_printf("[SYSTEM] IMU Initialized\n");
+    } else { 
+        mcu_printf("[ERROR] IMU Init Failed\n");
+        }
 
-// ✅ I2C Scan disabled to avoid disturbing bus during sensor init
-    
-   // Create application tasks
-    AppTaskCreate();
-    
-    mcu_printf("[SYSTEM] Creating Control Tasks...\n\n");
+    // ✅ I2C 초기화 (I2C2 CH_0)
+    if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
+        
+        // ✅ I2C 클럭 상태 확인
+        uint32 i2c_clk = CLOCK_GetPeriRate((sint32)CLOCK_PERI_I2C2);
+        mcu_printf("[DEBUG] I2C Clock: %d Hz\n", i2c_clk);
+        
+        // ✅ GPIO 기능 확인
+        mcu_printf("[DEBUG] Checking GPIO settings...\n");
+        mcu_printf("  (SCL): Expected=INPUT+FUNC2\n");
+        mcu_printf("  (SDA): Expected=INPUT+FUNC2\n");
+    }
+    // Create application tasks
+        AppTaskCreate();
+        
+        mcu_printf("[SYSTEM] Creating Control Tasks...\n\n");
     
     // // Task 0: Safety Monitor (100Hz)
     // err = SAL_TaskCreate(&gSafetyTaskID,
@@ -521,17 +530,17 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     //     mcu_printf("[SYSTEM] Motor Task Created (Priority: %d, 100Hz)\n", MOTOR_TASK_PRIO);
     // }
     
-    // // Task 3: IMU + Suspension (100Hz)
-    // err = SAL_TaskCreate(&gIMUSuspTaskID,
-    //                     (const uint8 *)"IMU_Suspension",
-    //                     (SALTaskFunc)&IMU_Suspension_Task,
-    //                     &gIMUSuspTaskStk[0],
-    //                     IMU_SUSP_TASK_STK_SIZE,
-    //                     IMU_SUSP_TASK_PRIO,
-    //                     NULL);
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] IMU+Susp Task Created (Priority: %d, 100Hz)\n", IMU_SUSP_TASK_PRIO);
-    // }
+    // Task 3: IMU + Suspension (100Hz)
+    err = SAL_TaskCreate(&gIMUSuspTaskID,
+                        (const uint8 *)"IMU_Suspension",
+                        (SALTaskFunc)&IMU_Suspension_Task,
+                        &gIMUSuspTaskStk[0],
+                        IMU_SUSP_TASK_STK_SIZE,
+                        IMU_SUSP_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] IMU+Susp Task Created (Priority: %d, 100Hz)\n", IMU_SUSP_TASK_PRIO);
+    }
     
     // // Task 4: Height Control (20Hz)
     // err = SAL_TaskCreate(&gHeightTaskID,
@@ -545,7 +554,7 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     //     mcu_printf("[SYSTEM] Height Task Created (Priority: %d, 20Hz)\n", HEIGHT_TASK_PRIO);
     // }
     
-    // // // Task 5: Monitoring (10Hz)
+    // Task 5: Monitoring (10Hz)
     // err = SAL_TaskCreate(&gMonitorTaskID,
     //                     (const uint8 *)"Monitoring",
     //                     (SALTaskFunc)&Monitoring_Task,
@@ -556,12 +565,14 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
     // if(err == SAL_RET_SUCCESS) {
     //     mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
     // }
+
+     //Task 6:ADXL345
     err = SAL_TaskCreate(&gADXL345TestTaskID,
-                        (const uint8 *)"ADXL345_Test",
-                        (SALTaskFunc)&ADXL345_Test_Task, // 수정한 테스트 함수
+                        (const uint8 *)"ADXL345_Monitor",
+                        (SALTaskFunc)&ADXL345_Monitor_Task, // 수정한 테스트 함수
                         &gADXL345TestTaskStk[0],
                         ADXL_TEST_TASK_STK_SIZE,
-                        ADXL_TEST_TASK_PRIO,
+                        ADXL_MONITOR_TASK_PRIO,
                         NULL);
 
     if(err == SAL_RET_SUCCESS) {
@@ -584,7 +595,8 @@ if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
 ***************************************************************************************************
 *                                          Safety_Monitor_Task
 ***************************************************************************************************
-*/void Safety_Monitor_Task(void *pArg) {
+*/
+void Safety_Monitor_Task(void *pArg) {
     (void)pArg;
     
     uint32 start_tick, current_tick;
@@ -889,126 +901,126 @@ void Motor_Control_Task(void *pArg) {
 *                                          IMU_Suspension_Task
 ***************************************************************************************************
 */
-void IMU_Suspension_Task(void *pArg) {
+
+void IMU_Suspension_Task(void *pArg)
+{
     (void)pArg;
-    
+
     uint32 start_tick, current_tick;
-    float servo_position[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-    
+
+    uint32 servo_pulse_ns[4] = {
+        SERVO_NEUTRAL_PULSE_NS,
+        SERVO_NEUTRAL_PULSE_NS,
+        SERVO_NEUTRAL_PULSE_NS,
+        SERVO_NEUTRAL_PULSE_NS
+    };
+
     static uint32 imu_sample_count = 0;
-    
+
     // 캘리브레이션 변수
     static uint8 calibration_done = 0;
-    float roll_sum = 0.0f;
+    float roll_sum  = 0.0f;
     float pitch_sum = 0.0f;
     uint32 calib_samples = 0;
     const uint32 CALIB_SAMPLES = 100;
 
     IMU_Data imuRaw;
-    
+    static uint8 servo_div2 = 0;
+
+    // ✅ ADXL Pre-kick (static으로 유지)
+    static float adxl_pre_kick[4] = {0, 0, 0, 0};
+
     mcu_printf("[IMU_SUSP] Task Started\n");
     mcu_printf("  - IMU Sampling: 100Hz (10ms)\n");
     mcu_printf("  - PID Control:  100Hz (10ms)\n");
-    mcu_printf("  - Servo Output: 100Hz (10ms) via PDM\n");
+    mcu_printf("  - Servo Output: 50Hz (20ms) via PDM\n");
     mcu_printf("  - Adaptive Damping: Speed-Dependent\n");
+    mcu_printf("  - ADXL Pre-kick: Enabled\n");
     mcu_printf("  - Calibrating Roll/Pitch offset...\n\n");
-    
+
     // 서보 초기화
     Servo_Init();
-    
+
     mcu_printf("\n╔════════════════════════════╗\n");
     mcu_printf("║   SERVO RANGE TEST START   ║\n");
     mcu_printf("╚════════════════════════════╝\n\n");
-    
-    float test_angles[4];
-    
-    // Test 1: 중립 (90도)
-    mcu_printf("▶ Test 1: Neutral (90deg)\n");
+
+    // Test 1: 최소 높이
+    mcu_printf("▶ Test 1: MIN Position (pulse=%d us)\n", (int)NS_TO_US(SERVO_MIN_PULSE_NS));
+    uint32 min_pulse[4] = {
+        SERVO_MIN_PULSE_NS,
+        SERVO_MIN_PULSE_NS,
+        SERVO_MIN_PULSE_NS,
+        SERVO_MIN_PULSE_NS
+    };
+    Servo_SetPulseAllNs(min_pulse);
+    SAL_TaskSleep(1500);
+
+    // Test 2: 최대 높이
+    mcu_printf("▶ Test 2: MAX Position (pulse=%d us)\n", (int)NS_TO_US(SERVO_MAX_PULSE_NS));
+    uint32 max_pulse[4] = {
+        SERVO_MAX_PULSE_NS,
+        SERVO_MAX_PULSE_NS,
+        SERVO_MAX_PULSE_NS,
+        SERVO_MAX_PULSE_NS
+    };
+    Servo_SetPulseAllNs(max_pulse);
+    SAL_TaskSleep(1500);
+
+    // Test 3: 중립
+    mcu_printf("▶ Test 3: Neutral Position (pulse=%d us)\n", (int)NS_TO_US(SERVO_NEUTRAL_PULSE_NS));
     Servo_SetNeutral_All();
-    SAL_TaskSleep(2000);
-    
-    // Test 2: 최소 (0도)
-    mcu_printf("▶ Test 2: Minimum (0deg)\n");
-    test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = 0.0f;
-    Servo_SetPosition_All(test_angles);
-    SAL_TaskSleep(2000);
-    
-    // Test 3: 최대 (180도)
-    mcu_printf("▶ Test 3: Maximum (180deg)\n");
-    test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = 180.0f;
-    Servo_SetPosition_All(test_angles);
-    SAL_TaskSleep(2000);
-    
-    // Test 4: 스윕 테스트
-    mcu_printf("▶ Test 4: Sweep (0→180→0)\n");
-    for(float angle = 0; angle <= 180; angle += 10) {
-        test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = angle;
-        Servo_SetPosition_All(test_angles);
-        SAL_TaskSleep(100);
-    }
-    for(float angle = 180; angle >= 0; angle -= 10) {
-        test_angles[0] = test_angles[1] = test_angles[2] = test_angles[3] = angle;
-        Servo_SetPosition_All(test_angles);
-        SAL_TaskSleep(100);
-    }
-    
-    // Test 5: 개별 제어
-    mcu_printf("▶ Test 5: Individual control\n");
-    test_angles[0] = 45;   // FL
-    test_angles[1] = 90;   // FR
-    test_angles[2] = 135;  // RL
-    test_angles[3] = 180;  // RR
-    Servo_SetPosition_All(test_angles);
-    SAL_TaskSleep(3000);
-    
-    // 중립 복귀
-    Servo_SetNeutral_All();
+    SAL_TaskSleep(1000);
+
     mcu_printf("\n✅ SERVO TEST COMPLETE!\n\n");
-    
-    // 초기 위치 설정
-    for(uint8 i = 0; i < 4; i++) {
-        servo_position[i] = 90.0f;
-    }
-    Servo_SetPosition_All(servo_position);
-    
+
+    for (uint8 i = 0; i < 4; i++) servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
+    Servo_SetPulseAllNs(servo_pulse_ns);
+
     SAL_CoreCriticalEnter();
-    for(uint8 i = 0; i < 4; i++) {
-        g_ServoData.position[i] = 90.0f;  
+    for (uint8 i = 0; i < 4; i++) {
+        g_ServoData.position[i] = (float)NS_TO_US(servo_pulse_ns[i]);
     }
+    g_IMU_SUSP_INIT_DONE = 1;
     SAL_CoreCriticalExit();
-    
-    mcu_printf("[IMU_SUSP] Servos initialized to 90 degrees\n");
-    
+
+    mcu_printf("[IMU_SUSP] Servos initialized to neutral pulse\n");
     SAL_TaskSleep(200);
+
+    // PID 초기화
+    for(uint8 i = 0; i < 4; i++) {
+        PID_Init(&pid_damping_wheel[i], DAMPING_KP_MEDIUM, 0.0f, DAMPING_KD_MEDIUM, IMU_SUSP_PERIOD_MS);
+    }
     
     while(1) {
         SAL_GetTickCount(&start_tick);
-        
+
         // ========== 1. IMU 읽기 ==========
-        if(IMU_Read_Data_DMA() != SAL_RET_SUCCESS) {
+        if (IMU_Read_Data_DMA() != SAL_RET_SUCCESS) {
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
             continue;
         }
 
         imuRaw = IMU;
-        
+
         // ========== 2. 캘리브레이션 단계 ==========
-        if(!calibration_done) {
+        if (!calibration_done)
+        {
             float roll_acc  = atan2f(imuRaw.accel_y, imuRaw.accel_z) * 180.0f / M_PI;
             float pitch_acc = atan2f(-imuRaw.accel_x,
-                              sqrtf(imuRaw.accel_y*imuRaw.accel_y +
-                                    imuRaw.accel_z*imuRaw.accel_z)) * 180.0f / M_PI;
-            
-            roll_sum += roll_acc;
+                               sqrtf(imuRaw.accel_y * imuRaw.accel_y +
+                                     imuRaw.accel_z * imuRaw.accel_z)) * 180.0f / M_PI;
+
+            roll_sum  += roll_acc;
             pitch_sum += pitch_acc;
             calib_samples++;
-            
-            if(calib_samples >= CALIB_SAMPLES) {
-                roll_offset = roll_sum / (float)CALIB_SAMPLES;
+
+            if (calib_samples >= CALIB_SAMPLES)
+            {
+                roll_offset  = roll_sum  / (float)CALIB_SAMPLES;
                 pitch_offset = pitch_sum / (float)CALIB_SAMPLES;
-                
                 calibration_done = 1;
-                
+
                 mcu_printf("  [CALIB] Complete!\n");
                 mcu_printf("  Roll offset:  ");
                 Print_Float_Value(roll_offset, 100);
@@ -1017,10 +1029,10 @@ void IMU_Suspension_Task(void *pArg) {
                 Print_Float_Value(pitch_offset, 100);
                 mcu_printf(" deg\n\n");
             }
-            
+
             SAL_CoreCriticalEnter();
-            g_IMUData.roll  = 0.0f;
-            g_IMUData.pitch = 0.0f;
+            g_IMUData.roll   = 0.0f;
+            g_IMUData.pitch  = 0.0f;
             g_IMUData.gyro_x = imuRaw.gyro_x;
             g_IMUData.gyro_y = imuRaw.gyro_y;
             g_IMUData.gyro_z = imuRaw.gyro_z;
@@ -1029,32 +1041,34 @@ void IMU_Suspension_Task(void *pArg) {
             g_IMUData.accel_z = imuRaw.accel_z;
             SAL_GetTickCount(&g_IMUData.last_update_time);
             SAL_CoreCriticalExit();
-            
-            for(uint8 i = 0; i < 4; i++) {
-                servo_position[i] = 90.0f;
+
+            for (uint8 i = 0; i < 4; i++) servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
+
+            servo_div2 ^= 1U;
+            if (servo_div2 == 0U) {
+                Servo_SetPulseAllNs(servo_pulse_ns);
             }
-            Servo_SetPosition_All(servo_position);
+
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
             continue;
         }
-        
+
         // ========== 3. Kalman 필터링 ==========
         imu_sample_count++;
-        
+
         float roll_acc  = atan2f(imuRaw.accel_y, imuRaw.accel_z) * 180.0f / M_PI;
         float pitch_acc = atan2f(-imuRaw.accel_x,
-                          sqrtf(imuRaw.accel_y*imuRaw.accel_y +
-                                imuRaw.accel_z*imuRaw.accel_z)) * 180.0f / M_PI;
+                          sqrtf(imuRaw.accel_y * imuRaw.accel_y +
+                                imuRaw.accel_z * imuRaw.accel_z)) * 180.0f / M_PI;
 
-        roll_acc -= roll_offset;
+        roll_acc  -= roll_offset;
         pitch_acc -= pitch_offset;
 
         float dt = IMU_SUSP_PERIOD_MS / 1000.0f;
 
         float roll  = Kalman_Update(&kalman_roll,  roll_acc,  imuRaw.gyro_x, dt);
         float pitch = Kalman_Update(&kalman_pitch, pitch_acc, imuRaw.gyro_y, dt);
-        
-        // IMU 데이터 업데이트
+
         SAL_CoreCriticalEnter();
         g_IMUData.roll  = fmaxf(fminf(roll,  MAX_TILT_ANGLE), -MAX_TILT_ANGLE);
         g_IMUData.pitch = fmaxf(fminf(pitch, MAX_TILT_ANGLE), -MAX_TILT_ANGLE);
@@ -1066,184 +1080,248 @@ void IMU_Suspension_Task(void *pArg) {
         g_IMUData.accel_z = imuRaw.accel_z;
         SAL_GetTickCount(&g_IMUData.last_update_time);
         SAL_CoreCriticalExit();
-        
+
         // 안정화 대기
-        if(imu_sample_count < 100) {
-            for(uint8 i = 0; i < 4; i++) {
-                servo_position[i] = 90.0f;
+        if (imu_sample_count < 100)
+        {
+            for (uint8 i = 0; i < 4; i++) servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
+
+            servo_div2 ^= 1U;
+            if (servo_div2 == 0U) {
+                Servo_SetPulseAllNs(servo_pulse_ns);
             }
-            Servo_SetPosition_All(servo_position);
-            
+
             SAL_CoreCriticalEnter();
-            for(uint8 i = 0; i < 4; i++) {
-                g_ServoData.position[i] = 90.0f;
+            for (uint8 i = 0; i < 4; i++) {
+                g_ServoData.position[i] = (float)NS_TO_US(servo_pulse_ns[i]);
             }
             SAL_CoreCriticalExit();
-            
+
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
             continue;
         }
-        
+
         // ========== 4. 안전 레벨 및 속도 읽기 ==========
         SAL_CoreCriticalEnter();
         SafetyLevel_t safety = g_SafetyData.level;
-        uint8 susp_disabled = g_SafetyData.suspension_disabled;
-        float range_limit = g_SafetyData.suspension_range_limit;
-        uint8 on_slope = g_SafetyData.on_slope_detected;
+        uint8 susp_disabled  = g_SafetyData.suspension_disabled;
+        float range_limit    = g_SafetyData.suspension_range_limit;
+        uint8 on_slope       = g_SafetyData.on_slope_detected;
         SAL_CoreCriticalExit();
-        
+
         SAL_CoreCriticalEnter();
         float current_speed = g_MotorData.current_speed;
         SAL_CoreCriticalExit();
-        
+
         // ========== 5. 비상 상황: 중립 복귀 ==========
-        if(susp_disabled || safety >= SAFETY_EMERGENCY) {
+        if (susp_disabled || safety >= SAFETY_EMERGENCY)
+        {
             PID_Reset(&pid_roll);
             PID_Reset(&pid_pitch);
             PID_Reset(&pid_damping);
             
             for(uint8 i = 0; i < 4; i++) {
-                servo_position[i] += (90.0f - servo_position[i]) * 0.05f;
+                PID_Reset(&pid_damping_wheel[i]);
+                adxl_pre_kick[i] = 0.0f;  // ✅ Pre-kick 리셋
             }
-            
-            Servo_SetPosition_All(servo_position);
-            
+
+            for (uint8 i = 0; i < 4; i++) {
+                float cur = (float)servo_pulse_ns[i];
+                float neu = (float)SERVO_NEUTRAL_PULSE_NS;
+                cur += (neu - cur) * 0.05f;
+                servo_pulse_ns[i] = (uint32)cur;
+            }
+
+            servo_div2 ^= 1U;
+            if (servo_div2 == 0U) {
+                Servo_SetPulseAllNs(servo_pulse_ns);
+            }
+
             SAL_CoreCriticalEnter();
-            for(uint8 i = 0; i < 4; i++) {
-                g_ServoData.position[i] = servo_position[i];
+            for (uint8 i = 0; i < 4; i++) {
+                g_ServoData.position[i] = (float)NS_TO_US(servo_pulse_ns[i]);
             }
             SAL_CoreCriticalExit();
-            
+
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
             continue;
         }
-        
+
         // ========== 6. CAN 명령 읽기 ==========
         SAL_CoreCriticalEnter();
         uint8 leveling_on = g_CANData.leveling_enable;
         SAL_CoreCriticalExit();
+
+        // ========================================================================
+        // ========== ✅ ADXL Pre-kick: 충격 감지 시 3도만 시작 ==========
+        // ========================================================================
         
+        float wheel_accel_z[4];
+        SAL_CoreCriticalEnter();
+        for(uint8 i = 0; i < 4; i++) {
+            wheel_accel_z[i] = g_ADXLData.accel_z[i];
+        }
+        SAL_CoreCriticalExit();
+
+        static float prev_wheel_accel_z[4] = {0};
+        const float IMPACT_THRESHOLD = 2.0f * 9.81f;  // 2G
+        const float PRE_KICK_MAGNITUDE = 3.0f;         // 3도
+        const float DECAY_RATE = 0.9f;                 // 90% 감쇠
+        
+        for(uint8 i = 0; i < 4; i++) {
+            float accel_change = wheel_accel_z[i] - prev_wheel_accel_z[i];
+            prev_wheel_accel_z[i] = wheel_accel_z[i];
+            
+            // ✅ 1. 기존 pre-kick 감쇠
+            adxl_pre_kick[i] *= DECAY_RATE;
+            
+            // ✅ 2. 새로운 충격 감지
+            if(fabsf(accel_change) > IMPACT_THRESHOLD) {
+                if(accel_change > 0) {
+                    adxl_pre_kick[i] = -PRE_KICK_MAGNITUDE;  // 위로 충격 → 수축
+                } else {
+                    adxl_pre_kick[i] = +PRE_KICK_MAGNITUDE;  // 아래로 충격 → 확장
+                }
+            }
+            
+            // ✅ 3. 매우 작아지면 0으로
+            if(fabsf(adxl_pre_kick[i]) < 0.1f) {
+                adxl_pre_kick[i] = 0.0f;
+            }
+        }
+
         // ========== 7. Auto-Leveling PID ==========
         float leveling[4] = {0, 0, 0, 0};
 
         static uint8 pid_initialized = 0;
-        if(!pid_initialized) {
+        if (!pid_initialized) {
             PID_Reset(&pid_roll);
             PID_Reset(&pid_pitch);
             PID_Reset(&pid_damping);
             pid_initialized = 1;
         }
-        
-        if(leveling_on) {
+
+        if (leveling_on)
+        {
             float gain_multiplier = on_slope ? 1.3f : 1.0f;
-            
-            float roll_control = PID_Update(&pid_roll, 0.0f, roll) * gain_multiplier;
+
+            float roll_control  = - PID_Update(&pid_roll,  0.0f, roll)  * gain_multiplier;
             float pitch_control = PID_Update(&pid_pitch, 0.0f, pitch) * gain_multiplier;
-            
+
+            // Roll/Pitch 기반 대각선 제어
             leveling[0] = -roll_control - pitch_control;  // FL
             leveling[1] =  roll_control - pitch_control;  // FR
             leveling[2] = -roll_control + pitch_control;  // RL
             leveling[3] =  roll_control + pitch_control;  // RR
-            
-            for(uint8 i = 0; i < 4; i++) {
-                float max_offset = 45.0f * range_limit;
-                if(leveling[i] > max_offset) leveling[i] = max_offset;
-                if(leveling[i] < -max_offset) leveling[i] = -max_offset;
+
+            for (uint8 i = 0; i < 4; i++) {
+                float max_offset = (float)ROLLOVER_ANGLE_THRESHOLD * range_limit;
+                if (leveling[i] >  max_offset) leveling[i] =  max_offset;
+                if (leveling[i] < -max_offset) leveling[i] = -max_offset;
             }
-        } else {
+        }
+        else
+        {
             PID_Reset(&pid_roll);
             PID_Reset(&pid_pitch);
         }
-        
+
         // ========== 8. 속도 의존 댐핑 ==========
-        static float prev_accel_z = 0;
+        static float prev_accel_z = 0.0f;
         float damping[4] = {0, 0, 0, 0};
-        
+
         float accel_change = imuRaw.accel_z - prev_accel_z;
         prev_accel_z = imuRaw.accel_z;
-        
-        // 속도에 따른 댐핑 모드 선택
+
         float damping_kp, damping_kd, max_damping;
-        
-        if(current_speed < SPEED_THRESHOLD_LOW) {
+        if (current_speed < SPEED_THRESHOLD_LOW) {
             damping_kp = DAMPING_KP_SOFT;
             damping_kd = DAMPING_KD_SOFT;
             max_damping = 10.0f;
-        } 
-        else if(current_speed < SPEED_THRESHOLD_HIGH) {
+        }
+        else if (current_speed < SPEED_THRESHOLD_HIGH) {
             damping_kp = DAMPING_KP_MEDIUM;
             damping_kd = DAMPING_KD_MEDIUM;
             max_damping = 12.0f;
-        } 
+        }
         else {
             damping_kp = DAMPING_KP_HARD;
             damping_kd = DAMPING_KD_HARD;
             max_damping = 15.0f;
         }
-        
-        // 실시간 PID 게인 업데이트
+
         pid_damping.Kp = damping_kp;
         pid_damping.Kd = damping_kd;
-        
-        // 댐핑 계산
+
         float damping_control = PID_Update(&pid_damping, 0.0f, accel_change / 9.81f);
-        
-        for(uint8 i = 0; i < 4; i++) {
+
+        for (uint8 i = 0; i < 4; i++) {
             damping[i] = damping_control;
-            
-            // 범위 제한
+
             float max_damp = max_damping * range_limit;
-            if(damping[i] > max_damp) damping[i] = max_damp;
-            if(damping[i] < -max_damp) damping[i] = -max_damp;
+            if (damping[i] >  max_damp) damping[i] =  max_damp;
+            if (damping[i] < -max_damp) damping[i] = -max_damp;
         }
-        
+
         // ========== 9. Height Offset 읽기 ==========
-        SAL_CoreCriticalEnter(); 
+        SAL_CoreCriticalEnter();
         float height = g_HeightData.height_offset;
         SAL_CoreCriticalExit();
-        
+
         // ========== 10. 통합 제어 + 슬루레이트 리미터 ==========
-        static float prev_target[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-        
-        for(uint8 i = 0; i < 4; i++) {
-            float target = 90.0f + height + leveling[i] + damping[i];
-            
-            // 안전 범위 제한
-            float safe_range = 90.0f * range_limit;
-            if(target > 90.0f + safe_range) target = 90.0f + safe_range;
-            if(target < 90.0f - safe_range) target = 90.0f - safe_range;
-            
-            // 슬루레이트 리미터 (급격한 변화 방지)
-            float max_change = 5.0f;  // 주기당 최대 5° 변화
-            float change = target - prev_target[i];
-            
-            if(change > max_change) {
-                target = prev_target[i] + max_change;
-            } else if(change < -max_change) {
-                target = prev_target[i] - max_change;
-            }
-            
-            prev_target[i] = target;
-            servo_position[i] = target;
+        static float prev_target_deg[4] = {0, 0, 0, 0};
+        float target_deg[4];
+
+        for (uint8 i = 0; i < 4; i++)
+        {
+            // ✅ 최종 = 차고 + 레벨링(ICM) + 댐핑(ICM) + Pre-kick(ADXL)
+            float t = height + leveling[i] + damping[i] + adxl_pre_kick[i];
+
+            float max_offset = (float)ROLLOVER_ANGLE_THRESHOLD * range_limit;
+            if (t >  max_offset) t =  max_offset;
+            if (t < -max_offset) t = -max_offset;
+
+            float max_change = 5.0f;
+            float diff = t - prev_target_deg[i];
+
+            if (diff >  max_change) t = prev_target_deg[i] + max_change;
+            if (diff < -max_change) t = prev_target_deg[i] - max_change;
+
+            prev_target_deg[i] = t;
+            target_deg[i] = t;
         }
-        
-        // ========== 11. 서보 출력 ==========
-        Servo_SetPosition_All(servo_position);
-        
+
+        // ========== 11. 서보 출력(펄스로만) ==========
+        const float PULSE_RANGE_NS = (float)((int32)SERVO_MAX_PULSE_NS - (int32)SERVO_MIN_PULSE_NS);
+        const float DEG_RANGE = (float)(2.0f * ROLLOVER_ANGLE_THRESHOLD);
+        const float NS_PER_DEG = PULSE_RANGE_NS / DEG_RANGE;
+
+        for (uint8 i = 0; i < 4; i++) {
+            float offset_ns = target_deg[i] * NS_PER_DEG;
+            float p = (float)SERVO_NEUTRAL_PULSE_NS + offset_ns;
+            servo_pulse_ns[i] = (uint32)p;
+        }
+
+        servo_div2 ^= 1U;
+        if (servo_div2 == 0U) {
+            Servo_SetPulseAllNs(servo_pulse_ns);
+        }
+
         SAL_CoreCriticalEnter();
-        for(uint8 i = 0; i < 4; i++) {
-            g_ServoData.position[i] = servo_position[i];
+        for (uint8 i = 0; i < 4; i++) {
+            g_ServoData.position[i] = (float)NS_TO_US(servo_pulse_ns[i]);
         }
         SAL_CoreCriticalExit();
-        
+
         // ========== 12. Sleep ==========
         SAL_GetTickCount(&current_tick);
         uint32 elapsed = current_tick - start_tick;
-        if(elapsed < IMU_SUSP_PERIOD_MS) {
+        if (elapsed < IMU_SUSP_PERIOD_MS) {
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS - elapsed);
         }
     }
 }
+
 
 /*
 ***************************************************************************************************
@@ -1339,68 +1417,141 @@ void Height_Control_Task(void *pArg) {
 */
 void Monitoring_Task(void *pArg) {
     (void)pArg;
-    
+
+    while (1) {
+        uint8 ready;
+        SAL_CoreCriticalEnter();
+        ready = g_IMU_SUSP_INIT_DONE;
+        SAL_CoreCriticalExit();
+
+        if (ready != 0U) break;
+        SAL_TaskSleep(50);   // 50ms polling
+    }
+
     mcu_printf("[MONITOR] Task Started (10Hz)\n\n");
+
+    /* optional: small delay to avoid immediate collision with last init prints */
+    SAL_TaskSleep(100);
     
-    SAL_TaskSleep(300);
     
     while(1) {
-        // Read all data
         SAL_CoreCriticalEnter();
         SafetyLevel_t safety = g_SafetyData.level;
-        uint8 on_slope = g_SafetyData.on_slope_detected;
         float roll = g_IMUData.roll;
         float pitch = g_IMUData.pitch;
-        float gyro_x = g_IMUData.gyro_x;
         float speed = g_MotorData.current_speed;
-        float height = g_HeightData.height_offset;
+
+        
+        // ✅ ADXL 데이터
+        float wheel_z[4];
+        for(uint8 i = 0; i < 4; i++) {
+            wheel_z[i] = g_ADXLData.accel_z[i];
+        }
+        
+        // ✅ 서보 위치
         float servo[4];
         for(uint8 i = 0; i < 4; i++) {
             servo[i] = g_ServoData.position[i];
         }
         SAL_CoreCriticalExit();
         
-        // ✅ 댐핑 모드 결정
-        const char* damping_mode;
-        if(speed < SPEED_THRESHOLD_LOW) {
-            damping_mode = "SOFT";
-        } else if(speed < SPEED_THRESHOLD_HIGH) {
-            damping_mode = "MED ";
-        } else {
-            damping_mode = "HARD";
-        }
-        
-        // Print status
-        mcu_printf("=========================================\n");
-        mcu_printf("Safety: %d | Slope: %s | Speed: ", safety, on_slope ? "YES" : "NO");
+        mcu_printf("==========================================\n");
+        mcu_printf("Safety: %d | Speed: ", safety);
         Print_Float_Value(speed, 10);
-        mcu_printf("%% | Damp: %s\n", damping_mode);  // ✅ 댐핑 모드 표시
+        mcu_printf("%%\n");
         
-        mcu_printf("Roll: ");
+        // ✅ ICM 차체 자세
+        mcu_printf("[ICM] Roll: ");
         Print_Float_Value(roll, 10);
-        mcu_printf("deg (");
-        Print_Float_Value(gyro_x, 10);
-        mcu_printf("deg/s) | Pitch: ");
+        mcu_printf(" Pitch: ");
         Print_Float_Value(pitch, 10);
-        mcu_printf("deg\n");
-        
-        mcu_printf("Height: ");
-        Print_Float_Value(height, 10);
-        mcu_printf("deg\n");
-        
-        mcu_printf("Servo: FL=");
-        Print_Float_Value(servo[0], 10);
-        mcu_printf(" FR=");
-        Print_Float_Value(servo[1], 10);
-        mcu_printf(" RL=");
-        Print_Float_Value(servo[2], 10);
-        mcu_printf(" RR=");
-        Print_Float_Value(servo[3], 10);
         mcu_printf("\n");
         
-        mcu_printf("=========================================\n\n");
+        // ✅ ADXL 각 바퀴 Z축
+        mcu_printf("[ADXL] FL: ");
+        Print_Float_Value(wheel_z[0], 10);
+        mcu_printf(" FR: ");
+        Print_Float_Value(wheel_z[1], 10);
+        mcu_printf(" RL: ");
+        Print_Float_Value(wheel_z[2], 10);
+        mcu_printf(" RR: ");
+        Print_Float_Value(wheel_z[3], 10);
+        mcu_printf(" m/s²\n");
+        
+        // ✅ 서보 최종 위치
+        mcu_printf("[SERVO] FL: ");
+        Print_Float_Value(servo[0], 10);
+        mcu_printf(" FR: ");
+        Print_Float_Value(servo[1], 10);
+        mcu_printf(" RL: ");
+        Print_Float_Value(servo[2], 10);
+        mcu_printf(" RR: ");
+        Print_Float_Value(servo[3], 10);
+        mcu_printf(" us\n");
+        mcu_printf("==========================================\n\n");
         
         SAL_TaskSleep(MONITOR_PERIOD_MS);
+    }
+}
+
+/*
+***************************************************************************************************
+*                                          ADXL345_Monitor_Task
+* 
+* 100Hz로 4개 ADXL345 센서를 읽어서 각 바퀴의 충격을 감지
+***************************************************************************************************
+*/
+
+static void ADXL345_Monitor_Task(void *pArg)
+{
+    (void)pArg;
+    
+    uint32 start_tick;
+    float prev_accel_z[4] = {0};
+    float impact_threshold = 2.0f * 9.81f;  // 2G
+    
+    mcu_printf("[ADXL345] Monitor Task Started (100Hz)\n");
+    
+    // 캘리브레이션
+    mcu_printf("[ADXL345] Calibrating all 4 sensors...\n");
+    ADXL345_CalibrateAll(200);  // 2초
+    
+    SAL_TaskSleep(100);
+    
+    while(1) {
+        SAL_GetTickCount(&start_tick);
+        
+        // 4개 센서 순차 읽기
+        for(uint8 dev = 0; dev < 4; dev++) {
+            float x, y, z;
+            
+            if(ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
+                // Z축 변화량 계산
+                float delta_z = fabsf(z - prev_accel_z[dev]);
+                prev_accel_z[dev] = z;
+                
+                // 충격 강도 (0~1 정규화)
+                float impact = 0.0f;
+                if(delta_z > impact_threshold) {
+                    impact = fminf((delta_z / impact_threshold) - 1.0f, 1.0f);
+                }
+                
+                // 공유 데이터 업데이트
+                SAL_CoreCriticalEnter();
+                g_ADXLData.accel_z[dev] = z;
+                g_ADXLData.impact_detected[dev] = impact;
+                SAL_GetTickCount(&g_ADXLData.last_update_time);
+                SAL_CoreCriticalExit();
+            }
+        }
+        
+        // 10ms 주기 유지
+        uint32 current_tick;
+        SAL_GetTickCount(&current_tick);
+        uint32 elapsed = current_tick - start_tick;
+        if(elapsed < 10) {
+            SAL_TaskSleep(10 - elapsed);
+        }
     }
 }
 
