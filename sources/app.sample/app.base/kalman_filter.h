@@ -21,5 +21,24 @@ typedef struct {
 
 void Kalman_Init(Kalman_t *kf);
 float Kalman_Update(Kalman_t *kf, float newAngle, float newRate, float dt);
+static inline void Kalman_SetR(Kalman_t *kf, float R)
+{
+    if (R < 0.0001f) R = 0.0001f;
+    kf->R_measure = R;
+}
+
+// ✅ 추가: Predict-only (가속도 신뢰도 낮을 때 사용)
+static inline float Kalman_PredictOnly(Kalman_t *kf, float newRate, float dt)
+{
+    float rate = newRate - kf->bias;
+    kf->angle += dt * rate;
+
+    kf->P[0][0] += dt * (dt*kf->P[1][1] - kf->P[0][1] - kf->P[1][0] + kf->Q_angle);
+    kf->P[0][1] -= dt * kf->P[1][1];
+    kf->P[1][0] -= dt * kf->P[1][1];
+    kf->P[1][1] += kf->Q_bias * dt;
+
+    return kf->angle;
+}
 
 #endif

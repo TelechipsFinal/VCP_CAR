@@ -10,7 +10,7 @@
  */
 #define ADXL345_I2C_CH          (0U)              // I2C0
 #define ADXL345_I2C_PORT        (0U)              // Port 0
-#define ADXL345_I2C_SPEED_KHZ   (400U)             // 400kHz (diagnostic 안정성)
+#define ADXL345_I2C_SPEED_KHZ   (100U)             // 400kHz (diagnostic 안정성)
 #define ADXL345_I2C_SCL_GPIO    GPIO_GPB(0)       // SCL
 #define ADXL345_I2C_SDA_GPIO    GPIO_GPB(1)       // SDA
 
