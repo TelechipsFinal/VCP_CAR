@@ -79,13 +79,6 @@ SALRetCode_t ADXL345_Test_Init(void)
     SAL_TaskSleep(50);
     mcu_printf("[ADXL345] I2C Initialized\n\n");
 
-    /* ===== 4개 센서 동시 캘리브레이션 ===== */
-    ret = ADXL345_CalibrateAll(200);  // 200 samples = 약 2초
-    
-    if (ret != SAL_RET_SUCCESS) {
-        mcu_printf("[ADXL345] Calibration Failed!\n");
-    }
-
     initialized = 1;
     return SAL_RET_SUCCESS;
 }
@@ -329,196 +322,6 @@ SALRetCode_t ADXL345_ReadRaw(uint8 sensor_id, int16 *x, int16 *y, int16 *z)
 
 /*
 ***************************************************************************************************
-*                                          ADXL345_CalibrateOffset
-*
-* Function to calibrate sensor offset (gravity removal when sensor is flat)
-*
-* @param    sensor_id [in]  : Sensor ID (0-3)
-* @param    samples [in]    : Number of samples to average (recommended: 100-1000)
-* @return   SAL_RET_SUCCESS or SAL_RET_FAILED
-* Notes
-*           - Place sensor on flat, stable surface before calling
-*           - Sensor should be still during calibration
-*           - Takes approximately (samples * 10ms) to complete
-*
-***************************************************************************************************
-*/SALRetCode_t ADXL345_CalibrateOffset(uint8 sensor_id, uint16 samples)
-{
-    float sum_x = 0.0f;
-    float sum_y = 0.0f;
-    float sum_z = 0.0f;
-    float x, y, z;
-    uint16 i;
-    uint16 valid_samples = 0;
-    SALRetCode_t ret;
-
-    if (sensor_id >= 4) {
-        return SAL_RET_FAILED;
-    }
-
-    mcu_printf("[ADXL345] Starting calibration (sensor %d, %d samples)...\n", 
-               sensor_id, samples);
-    mcu_printf("[ADXL345] Please keep sensor FLAT and STILL!\n");
-
-    SAL_TaskSleep(1000);
-
-    for (i = 0; i < samples; i++) {
-        ret = ADXL345_ReadAccel(sensor_id, &x, &y, &z);
-        
-        if (ret == SAL_RET_SUCCESS) {
-            sum_x += x;
-            sum_y += y;
-            sum_z += z;
-            valid_samples++;
-        }
-
-        SAL_TaskSleep(10);
-
-        if ((i % 100) == 0) {
-            mcu_printf(".");
-        }
-    }
-
-    mcu_printf("\n");
-
-    if (valid_samples < (samples / 2)) {
-        mcu_printf("[ADXL345] Calibration failed: too few valid samples (%d/%d)\n", 
-                   valid_samples, samples);
-        return SAL_RET_FAILED;
-    }
-
-    float avg_x = sum_x / (float)valid_samples;
-    float avg_y = sum_y / (float)valid_samples;
-    float avg_z = sum_z / (float)valid_samples;
-
-    g_adxl345_cal[sensor_id].offset_x = -avg_x;
-    g_adxl345_cal[sensor_id].offset_y = -avg_y;
-    g_adxl345_cal[sensor_id].offset_z = -(avg_z - 9.80665f);
-
-    g_adxl345_cal[sensor_id].scale_x = 1.0f;
-    g_adxl345_cal[sensor_id].scale_y = 1.0f;
-    g_adxl345_cal[sensor_id].scale_z = 1.0f;
-
-    g_adxl345_cal[sensor_id].calibrated = 1;
-
-    mcu_printf("[ADXL345] Calibration complete!\n");
-    
-    // ✅ multiplier를 1000으로 증가 (소수점 3자리)
-    mcu_printf("  Measured: X=");
-    Print_Float_Value(avg_x, 1000);
-    mcu_printf(", Y=");
-    Print_Float_Value(avg_y, 1000);
-    mcu_printf(", Z=");
-    Print_Float_Value(avg_z, 1000);
-    mcu_printf(" m/s²\n");
-    
-    mcu_printf("  Offsets:  X=");
-    Print_Float_Value(g_adxl345_cal[sensor_id].offset_x, 1000);
-    mcu_printf(", Y=");
-    Print_Float_Value(g_adxl345_cal[sensor_id].offset_y, 1000);
-    mcu_printf(", Z=");
-    Print_Float_Value(g_adxl345_cal[sensor_id].offset_z, 1000);
-    mcu_printf(" m/s²\n");
-
-    return SAL_RET_SUCCESS;
-}
-
-/*
-***************************************************************************************************
-*                                          ADXL345_CalibrateAll
-*
-* Function to calibrate all sensors simultaneously (interleaved sampling)
-*
-* @param    samples [in]    : Number of samples per sensor (recommended: 100-500)
-* @return   SAL_RET_SUCCESS or SAL_RET_FAILED
-* Notes
-*           - Much faster than calibrating sensors one by one
-*           - Takes approximately (samples * ADXL_COUNT * 10ms) instead of (samples * 10ms * ADXL_COUNT)
-*
-***************************************************************************************************
-*/
-SALRetCode_t ADXL345_CalibrateAll(uint16 samples)
-{
-    float sum_x[ADXL_COUNT] = {0};
-    float sum_y[ADXL_COUNT] = {0};
-    float sum_z[ADXL_COUNT] = {0};
-    uint16 valid_samples[ADXL_COUNT] = {0};
-    float x, y, z;
-    uint16 i;
-    uint8 dev;
-    SALRetCode_t ret;
-
-    mcu_printf("[ADXL345] Calibrating ALL sensors (%d samples each)...\n", samples);
-    mcu_printf("[ADXL345] Keep ALL sensors FLAT and STILL!\n");
-
-    SAL_TaskSleep(1000);
-
-    // 인터리브 샘플링: 센서 0→1→2→3→0→1→2→3...
-    for (i = 0; i < samples; i++) {
-        for (dev = 0; dev < ADXL_COUNT; dev++) {
-            ret = ADXL345_ReadAccel(dev, &x, &y, &z);
-            
-            if (ret == SAL_RET_SUCCESS) {
-                sum_x[dev] += x;
-                sum_y[dev] += y;
-                sum_z[dev] += z;
-                valid_samples[dev]++;
-            }
-        }
-
-        SAL_TaskSleep(10);  // 센서 4개 읽는데 10ms
-
-        if ((i % 50) == 0) {
-            mcu_printf(".");
-        }
-    }
-
-    mcu_printf("\n");
-
-    // 각 센서별로 캘리브레이션 파라미터 계산
-    for (dev = 0; dev < ADXL_COUNT; dev++) {
-        if (valid_samples[dev] < (samples / 2)) {
-            mcu_printf("[ADXL%d] Calibration FAILED: too few samples (%d/%d)\n", 
-                       dev, valid_samples[dev], samples);
-            continue;
-        }
-
-        float avg_x = sum_x[dev] / (float)valid_samples[dev];
-        float avg_y = sum_y[dev] / (float)valid_samples[dev];
-        float avg_z = sum_z[dev] / (float)valid_samples[dev];
-
-        g_adxl345_cal[dev].offset_x = -avg_x;
-        g_adxl345_cal[dev].offset_y = -avg_y;
-        g_adxl345_cal[dev].offset_z = -(avg_z - 9.80665f);
-
-        g_adxl345_cal[dev].scale_x = 1.0f;
-        g_adxl345_cal[dev].scale_y = 1.0f;
-        g_adxl345_cal[dev].scale_z = 1.0f;
-
-        g_adxl345_cal[dev].calibrated = 1;
-
-        mcu_printf("[ADXL%d] OK: X=", dev);
-        Print_Float_Value(avg_x, 100);
-        mcu_printf(" Y=");
-        Print_Float_Value(avg_y, 100);
-        mcu_printf(" Z=");
-        Print_Float_Value(avg_z, 100);
-        mcu_printf(" -> Offset: X=");
-        Print_Float_Value(g_adxl345_cal[dev].offset_x, 100);
-        mcu_printf(" Y=");
-        Print_Float_Value(g_adxl345_cal[dev].offset_y, 100);
-        mcu_printf(" Z=");
-        Print_Float_Value(g_adxl345_cal[dev].offset_z, 100);
-        mcu_printf("\n");
-    }
-
-    mcu_printf("[ADXL345] All sensors calibration complete!\n");
-
-    return SAL_RET_SUCCESS;
-}
-
-/*
-***************************************************************************************************
 *                                          ADXL345_GetCalibration
 *
 * Function to get current calibration parameters
@@ -635,4 +438,46 @@ SALRetCode_t ADXL_MuxSelectByDev(uint8 dev)
     return TCA9548A_SelectChannel(g_adxl_mux_ch[dev]);
 }
 
+SALRetCode_t ADXL345_QuickCalibrateAll(uint32 samples)
+{
+    float sum_x[4] = {0}, sum_y[4] = {0}, sum_z[4] = {0};
+    uint32 valid_samples[4] = {0};
 
+    for(uint32 i = 0; i < samples; i++) {
+        for(uint8 dev = 0; dev < 4; dev++) {
+            float x, y, z;
+            if(ADXL345_ReadAccel(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
+                sum_x[dev] += x;
+                sum_y[dev] += y;
+                sum_z[dev] += z;
+                valid_samples[dev]++;
+            }
+        }
+        SAL_TaskSleep(10);  // 100Hz
+    }
+
+    for(uint8 dev = 0; dev < 4; dev++) {
+        if(valid_samples[dev] < (samples / 2U)) {
+            mcu_printf("  [WARN] ADXL%d: Low sample count (%lu/%lu)\n",
+                       dev, (unsigned long)valid_samples[dev], (unsigned long)samples);
+            g_adxl345_cal[dev].calibrated = 0;
+            continue;
+        }
+
+        float avg_x = sum_x[dev] / (float)valid_samples[dev];
+        float avg_y = sum_y[dev] / (float)valid_samples[dev];
+        float avg_z = sum_z[dev] / (float)valid_samples[dev];
+
+        // ✅ CalibrateAll()과 동일한 정의로 맞추기 (raw + offset 방식)
+        g_adxl345_cal[dev].offset_x = -avg_x;
+        g_adxl345_cal[dev].offset_y = -avg_y;
+        g_adxl345_cal[dev].offset_z = -(avg_z - 9.80665f);
+
+        g_adxl345_cal[dev].scale_x = 1.0f;
+        g_adxl345_cal[dev].scale_y = 1.0f;
+        g_adxl345_cal[dev].scale_z = 1.0f;
+        g_adxl345_cal[dev].calibrated = 1;
+    }
+
+    return SAL_RET_SUCCESS;
+}

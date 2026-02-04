@@ -47,11 +47,10 @@ extern const uint8 g_adxl_mux_ch[ADXL_COUNT];  // MUX 채널 맵핑
 SALRetCode_t ADXL_MuxSelectByDev(uint8 dev);   // MUX 채널 선택
 
 // Calibration functions
-SALRetCode_t ADXL345_CalibrateOffset(uint8 sensor_id, uint16 samples);
-SALRetCode_t ADXL345_CalibrateAll(uint16 samples);  // ✅ 추가
 SALRetCode_t ADXL345_GetCalibration(uint8 sensor_id, ADXL345_Calibration_t *cal);
 SALRetCode_t ADXL345_SetCalibration(uint8 sensor_id, const ADXL345_Calibration_t *cal);
 SALRetCode_t ADXL345_ReadAccelCalibrated(uint8 sensor_id, float *x, float *y, float *z);
+SALRetCode_t ADXL345_QuickCalibrateAll(uint32 samples);
 
 /* 함수 */
 SALRetCode_t ADXL345_Test_Init(void);
