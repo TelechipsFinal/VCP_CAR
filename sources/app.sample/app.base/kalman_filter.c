@@ -3,8 +3,6 @@
 #include <ICM_20948.h>
 
 
-
-
 void Kalman_Init(Kalman_t *kf)
 {
     kf->angle = 0.0f;
@@ -18,6 +16,13 @@ void Kalman_Init(Kalman_t *kf)
     kf->Q_angle = KALMAN_Q_ANGLE;
     kf->Q_bias = KALMAN_Q_BIAS;
     kf->R_measure = KALMAN_R_MEASURE;
+}
+
+static inline float wrap_angle_deg(float a)
+{
+    while (a > 180.0f) a -= 360.0f;
+    while (a < -180.0f) a += 360.0f;
+    return a;
 }
 
 float Kalman_Update(Kalman_t *kf, float newAngle, float newRate, float dt)

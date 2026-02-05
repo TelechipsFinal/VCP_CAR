@@ -142,10 +142,10 @@ typedef enum {
 #define TRACK_WIDTH_MM          (233.0f)    // 좌우 바퀴 간격
 
 /* ===== 레벨링 PID 게인 (STM32 방식) ===== */
-#define LEVELING_GAIN           2.2f
+#define LEVELING_GAIN           2.0f
 #define INTEGRAL_GAIN           0.30f
-#define INTEGRAL_MAX            35.0f
-#define DERIVATIVE_GAIN         0.30f
+#define INTEGRAL_MAX            25.0f
+#define DERIVATIVE_GAIN         0.25f
 #define DERIVATIVE_FILTER       0.7f
 #define DEADBAND                0.5f
 
@@ -191,8 +191,8 @@ typedef enum {
 #define LEVELING_SIGN_PITCH  (1.0f)
 
 // 히스테리시스 deadzone
-#define TGT_DZ_ENTER 0.03f
-#define TGT_DZ_EXIT  0.06f
+#define TGT_DZ_ENTER 0.06f
+#define TGT_DZ_EXIT  0.12f
 
 #define LPF_CUTOFF_FREQ         1.5f
 
@@ -205,6 +205,16 @@ typedef enum {
 #define KALMAN_R_MIN            (0.10f)  // 기존 값
 #define KALMAN_R_MAX            (5.00f)  // 흔들릴 때 accel 거의 무시
 
+
+// ===== Leveling deadband / integral enable (mm 단위로 고정) =====
+// 평지에서 0.6deg 정도는 움직이지 않게 하고 싶다 -> mm로 환산해서 쓰는 게 정석이지만
+// 최소 수정 버전: mm로 직접 지정 (차체 치수 기준 대략 0.6~1.2deg 정도에 해당)
+#define LEVEL_DB_MM_FLAT          1.5f   // 평지 deadband (mm)
+#define LEVEL_DB_MM_FLAT_SOFT     2.0f   // 아주 소각도에서 더 큰 deadband (mm)
+#define LEVEL_I_ENABLE_MM         5.0f   // 이 이상에서만 적분 허용 (mm)
+
+// ✅ 레버리지 비율 계산
+#define LEVERAGE_RATIO  (TRACK_WIDTH_MM / WHEELBASE_MM)  // 0.764
 /*
 ***************************************************************************************************
 *                                         GLOBAL VARIABLES
@@ -474,68 +484,96 @@ static float height_to_servo_deg(float height_mm, float max_angle_deg) {
     float scale = max_angle_deg / max_height_mm;
     return height_mm * scale;
 }
+
 static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uint8 on_slope)
 {
     pid->error = error;
-
+    
+    // ✅ 추가: 장시간 카운터
+    static uint32 small_error_cycles = 0;
+    
+    // 정지/소각도에서 적분 리셋
     if (!on_slope) {
-    if (fabsf(error) < 2.0f) {        /* 소각도/정지 근처 */
-        pid->integral *= 0.70f;       /* 기존 0.90보다 강하게 누설 */
-        if (fabsf(pid->integral) < 0.05f) {
-            pid->integral = 0.0f;
+        if (fabsf(error) < 3.0f) {  // 3mm = 약 1.4도
+            pid->integral *= 0.50f;
+            
+            if (fabsf(pid->integral) < 0.5f) {
+                pid->integral = 0.0f;
+            }
         }
-    }
+        
+        // ✅ 추가: 2도 이하가 오래 지속되면 강제 감소
+        if (fabsf(error) < 4.0f) {  // 2도 이하
+            small_error_cycles++;
+            
+            // 10초 이상 (1000 cycles @ 100Hz)
+            if (small_error_cycles > 1000) {
+                pid->integral *= 0.95f;  // 천천히 감소
+                
+                if (fabsf(pid->integral) > 15.0f) {
+                    mcu_printf("[WARN] Long-term integral high: ");
+                    Print_Float_Value(pid->integral, 10);
+                    mcu_printf(" | Forcing decay\n");
+                    pid->integral *= 0.80f;
+                }
+            }
+        } else {
+            small_error_cycles = 0;  // 리셋
+        }
     }
 
     // 충격 감지
     float error_change = fabsf(error - pid->prev_error);
-    if (error_change > 5.0f) {
+    if (error_change > 8.0f) {
         pid->integral *= 0.2f;
+        small_error_cycles = 0;
     }
 
-    float db = DEADBAND;
-    float i_enable = 1.0f;
-
-    if (on_slope) {
-        db = 0.5f;
-        i_enable = 1.0f;
-    } else {
-        if (fabsf(error) < 3.0f) {
-            db = LEVELING_DEADBAND_SOFT;
-            i_enable = 0.0f;  
-        }
-    }
-
-    /* Anti-windup */
-    if (fabsf(error) > db && i_enable > 0.5f) {
-        float error_reduction = pid->prev_error - error;
-        
-        if (error_reduction > -0.5f) {
-            pid->integral += error * dt;
-            pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
-        } else if (fabsf(pid->integral) > INTEGRAL_MAX * 0.8f) {
-            pid->integral *= 0.98f;
-        } else {
-            pid->integral += error * dt;
-            pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
-        }
-    } else {
-        pid->integral *= 0.90f;
-    }
-
-    /* ✅ 수정: 오버슈트 감지 강화 - 에러가 급격히 줄어들 때도 감지 */
-    // 방법 1: 부호 반전 (기존)
-    if ((pid->prev_error > 1.0f && error < -1.0f) ||
-        (pid->prev_error < -1.0f && error > 1.0f)) {
-        pid->integral *= 0.3f;
-    }
+    // 적분 활성화
+    float i_enable = on_slope ? 3.0f : 5.0f;  // 4.0 → 5.0
     
-    // ✅ 방법 2: 급격한 개선 감지 (새로 추가!)
-    // 에러가 1초에 10도 이상 줄어들면 과보정
-    float error_rate = (pid->prev_error - error) / dt;  // deg/s
+    if (fabsf(error) > i_enable) {
+        pid->integral += error * dt;
+        pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+        small_error_cycles = 0;
+    } else {
+        pid->integral *= 0.95f;
+        if (fabsf(pid->integral) < 0.2f) {
+            pid->integral = 0.0f;
+        }
+    }
+
+    // ✅ 추가: 복귀 감지 (기울기 감소 중 + 적분 많이 쌓임)
+    if (fabsf(error) < 10.0f && fabsf(pid->integral) > 15.0f) {
+        // 에러 감소 중인데 적분이 많이 남아있으면
+        float error_rate = (pid->prev_error - error) / dt;
+        
+        // 복귀 중이면 (에러가 빠르게 줄어들면)
+        if (fabsf(error_rate) > 50.0f) {
+            pid->integral *= 0.70f;  // 적분 30% 감소
+        }
+    }
+
+    // 오버슈트 감지
+    if ((pid->prev_error >  2.0f && error < -2.0f) ||
+        (pid->prev_error < -2.0f && error >  2.0f)) {
+        pid->integral *= 0.3f;
+        small_error_cycles = 0;
+    }
+
+    // 급격한 개선
+    float error_rate = (pid->prev_error - error) / dt;
     if (fabsf(error_rate) > 100.0f && fabsf(pid->integral) > 2.0f) {
-        // 에러가 너무 빨리 줄어듦 = 과보정 중
-        pid->integral *= 0.5f;  // 적분 절반으로
+        pid->integral *= 0.5f;
+        small_error_cycles = 0;
+    }
+
+    // ✅ 적분 상한 경고
+    if (fabsf(pid->integral) > INTEGRAL_MAX * 0.8f) {
+        mcu_printf("[WARN] PID integral high: ");
+        Print_Float_Value(pid->integral, 10);
+        mcu_printf("\n");
+        pid->integral *= 0.75f;
     }
 
     // Derivative with LPF
@@ -550,6 +588,7 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
                   pid->integral * INTEGRAL_GAIN +
                   pid->derivative * DERIVATIVE_GAIN;
 }
+
 
 static void reset_leveling_pid(PID_Leveling_t *pid) {
     pid->error = 0.0f;
@@ -1099,7 +1138,7 @@ void IMU_Suspension_Task(void *pArg)
     (void)pArg;
 
     uint32 start_tick, current_tick;
-    
+
     double gx_sum = 0.0, gy_sum = 0.0, gz_sum = 0.0;
 
     uint32 servo_pulse_ns[4] = {
@@ -1116,18 +1155,17 @@ void IMU_Suspension_Task(void *pArg)
     uint32 calib_samples = 0;
 
     const uint32 CAL_MS = 3000;
-    const uint32 PERIOD_MS = IMU_SUSP_PERIOD_MS;     // 10ms
-    const uint32 CALIB_SAMPLES = (CAL_MS / PERIOD_MS);  // 300
-    const uint32 STABILIZATION_SAMPLES = 200;        // 기존 유지(2초)
+    const uint32 PERIOD_MS = IMU_SUSP_PERIOD_MS;
+    const uint32 CALIB_SAMPLES = (CAL_MS / PERIOD_MS);
+    const uint32 STABILIZATION_SAMPLES = 200;
 
     IMU_Data imuRaw;
 
     // ADXL 관련
-    static float wheel_lp_z[4] = {0};       // LPF (중력/경사 성분)
-    static float adxl_pre_kick[4] = {0};    // Pre-kick 제어량
+    static float wheel_lp_z[4] = {0};
+    static float adxl_pre_kick[4] = {0};
     static float wheel_prev_z_damp[4] = {0};
 
-    // ✅ deg/sec 기반 추종용 상태 (서보 목표를 바로 보내지 않고 속도 제한으로 따라감)
     static float servo_current_deg[4] = {0, 0, 0, 0};
 
     mcu_printf("[IMU_SUSP] Task Started\n");
@@ -1135,11 +1173,11 @@ void IMU_Suspension_Task(void *pArg)
     mcu_printf("  - Damping: ADXL per-wheel\n");
     mcu_printf("  - Servo follow: deg/sec rate limiting\n\n");
 
-    // 서보 초기화
+    // ✅ 서보 중립으로 먼저 이동
+    mcu_printf("[SERVO] Moving to neutral position...\n");
     Servo_Init();
     Servo_SetPulseAllNs(servo_pulse_ns);
-
-    // 초기값: servo_current_deg도 0(중립 기준 오프셋 0deg)
+    
     for (uint8 i = 0; i < 4; i++) servo_current_deg[i] = 0.0f;
 
     SAL_CoreCriticalEnter();
@@ -1156,8 +1194,12 @@ void IMU_Suspension_Task(void *pArg)
                          IMU_SUSP_PERIOD_MS);
     }
 
-    mcu_printf("[SERVO] Initialized to neutral\n");
-    mcu_printf("[CALIB] Starting calibration (50 samples)...\n");
+    // ✅ 서보 안정화 대기 (1초)
+    mcu_printf("[SERVO] Waiting for servo stabilization (1s)...\n");
+    SAL_TaskSleep(1000);
+    
+    mcu_printf("[CALIB] Starting 3-second neutral calibration...\n");
+    mcu_printf("        Keep the vehicle still and level!\n\n");
 
     while (1) {
         SAL_GetTickCount(&start_tick);
@@ -1172,13 +1214,16 @@ void IMU_Suspension_Task(void *pArg)
         /* ========== 2. Neutral + 3초 캘리브레이션 ========== */
         if (!calibration_done) {
 
-            /* ✅ 시작 직후/캘리브 중에는 항상 중립 유지 */
+            /* 중립 유지 */
             for (uint8 i = 0; i < 4; i++) {
                 servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
             }
             Servo_SetPulseAllNs(servo_pulse_ns);
 
-            /* IMU 읽기 성공했을 때만 샘플 누적 */
+            gx_sum += (double)imuRaw.gyro_x;
+            gy_sum += (double)imuRaw.gyro_y;
+            gz_sum += (double)imuRaw.gyro_z;
+
             float r_acc = atan2f(imuRaw.accel_y, imuRaw.accel_z) * 180.0f / M_PI;
             float p_acc = atan2f(-imuRaw.accel_x,
                                 sqrtf(imuRaw.accel_y * imuRaw.accel_y +
@@ -1188,25 +1233,57 @@ void IMU_Suspension_Task(void *pArg)
             icm_pitch_sum += (double)p_acc;
             calib_samples++;
 
+            // ✅ 50샘플마다만 출력 (0.5초마다)
             if ((calib_samples % 50) == 0) {
-                mcu_printf("  [CALIB] Neutral calib: %lu/%lu\n",
-                        (unsigned long)calib_samples, (unsigned long)CALIB_SAMPLES);
+                // ADXL 읽기
+                float adxl_x[4], adxl_y[4], adxl_z[4];
+                for(uint8 i = 0; i < 4; i++) {
+                    SAL_CoreCriticalEnter();
+                    adxl_x[i] = 0.0f;  // 현재는 g_ADXLData에 x,y가 없으니 0으로
+                    adxl_y[i] = 0.0f;
+                    adxl_z[i] = g_ADXLData.accel_z[i];
+                    SAL_CoreCriticalExit();
+                }
+                
+                mcu_printf("  [%d/%d] ICM(R/P): ", calib_samples, CALIB_SAMPLES);
+                Print_Float_Value(r_acc, 10);
+                mcu_printf("/");
+                Print_Float_Value(p_acc, 10);
+                mcu_printf(" | ADXL_Z: ");
+                Print_Float_Value(adxl_z[0], 10);
+                mcu_printf("/");
+                Print_Float_Value(adxl_z[1], 10);
+                mcu_printf("/");
+                Print_Float_Value(adxl_z[2], 10);
+                mcu_printf("/");
+                Print_Float_Value(adxl_z[3], 10);
+                mcu_printf(" m/s2\n");
             }
 
-            /* ✅ 3초(300샘플) 완료 */
             if (calib_samples >= CALIB_SAMPLES) {
                 roll_offset  = (float)(icm_roll_sum  / (double)CALIB_SAMPLES);
                 pitch_offset = (float)(icm_pitch_sum / (double)CALIB_SAMPLES);
 
-                mcu_printf("\n[CALIB] ICM offsets done (3s neutral)\n");
-                mcu_printf("  ICM Roll offset: ");
+                gyro_bias_x = (float)(gx_sum / (double)CALIB_SAMPLES);
+                gyro_bias_y = (float)(gy_sum / (double)CALIB_SAMPLES);
+                gyro_bias_z = (float)(gz_sum / (double)CALIB_SAMPLES);
+
+                mcu_printf("\n[CALIB] ICM calibration complete!\n");
+                mcu_printf("  Roll offset: ");
                 Print_Float_Value(roll_offset, 100);
-                mcu_printf(" deg\n  ICM Pitch offset: ");
+                mcu_printf(" deg | Pitch offset: ");
                 Print_Float_Value(pitch_offset, 100);
                 mcu_printf(" deg\n");
+                
+                mcu_printf("  Gyro bias X/Y/Z: ");
+                Print_Float_Value(gyro_bias_x, 100);
+                mcu_printf("/");
+                Print_Float_Value(gyro_bias_y, 100);
+                mcu_printf("/");
+                Print_Float_Value(gyro_bias_z, 100);
+                mcu_printf(" dps\n");
 
-                /* ✅ ADXL bias 캘리브 완료 대기 (ADXL Task가 3초 동안 수행) */
-                mcu_printf("[CALIB] Waiting ADXL bias calibration...\n");
+                mcu_printf("\n[CALIB] Waiting for ADXL bias calibration...\n");
                 while (1) {
                     uint8 adxl_ok;
                     SAL_CoreCriticalEnter();
@@ -1217,11 +1294,11 @@ void IMU_Suspension_Task(void *pArg)
                 }
 
                 calibration_done = 1;
-                imu_sample_count = 0;   /* ✅ 안정화 카운트는 캘리브 이후부터 다시 */
-                mcu_printf("\n[CALIB] Complete! Start stabilization...\n\n");
+                imu_sample_count = 0;
+                mcu_printf("\n[CALIB] All sensors calibrated!\n");
+                mcu_printf("[STABIL] Starting 2-second stabilization...\n\n");
             }
 
-            /* 캘리브 중에는 IMU 공유값은 0으로 유지 */
             SAL_CoreCriticalEnter();
             g_IMUData.roll  = 0.0f;
             g_IMUData.pitch = 0.0f;
@@ -1238,9 +1315,12 @@ void IMU_Suspension_Task(void *pArg)
             continue;
         }
 
-
         // ========== 3. Kalman 필터링 ==========
         imu_sample_count++;
+
+        float gx = imuRaw.gyro_x - gyro_bias_x;
+        float gy = imuRaw.gyro_y - gyro_bias_y;
+        float gz = imuRaw.gyro_z - gyro_bias_z;
 
         float roll_acc  = atan2f(imuRaw.accel_y, imuRaw.accel_z) * 180.0f / M_PI - roll_offset;
         float pitch_acc = atan2f(-imuRaw.accel_x,
@@ -1255,12 +1335,11 @@ void IMU_Suspension_Task(void *pArg)
         float acc_mag = sqrtf(ax*ax + ay*ay + az*az);
         float acc_err = fabsf(acc_mag - ACC_MAG_NORM);
     
-        // ✅ acc 신뢰도에 따라 R을 키우면 (S 커짐) accel을 덜 믿게 됨
         float R;
         if (acc_err <= ACC_OK_BAND) {
             R = KALMAN_R_MIN;
         } else if (acc_err <= ACC_SOFT_BAND) {
-            float t = (acc_err - ACC_OK_BAND) / (ACC_SOFT_BAND - ACC_OK_BAND); /* 0..1 */
+            float t = (acc_err - ACC_OK_BAND) / (ACC_SOFT_BAND - ACC_OK_BAND);
             R = KALMAN_R_MIN + t * (KALMAN_R_MAX - KALMAN_R_MIN);
         } else {
             R = KALMAN_R_MAX;
@@ -1269,40 +1348,39 @@ void IMU_Suspension_Task(void *pArg)
         Kalman_SetR(&kalman_roll,  R);
         Kalman_SetR(&kalman_pitch, R);
 
-        // ✅ 극단 구간에서는 accel 업데이트 스킵(자이로 적분만)
         uint8 acc_ok = (acc_err <= ACC_SOFT_BAND) ? 1U : 0U;
 
         float roll, pitch;
         if (acc_ok) {
-            roll  = Kalman_Update(&kalman_roll,  roll_acc,  imuRaw.gyro_x, dt);
-            pitch = Kalman_Update(&kalman_pitch, pitch_acc, imuRaw.gyro_y, dt);
+            roll  = Kalman_Update(&kalman_roll,  roll_acc,  gx, dt);
+            pitch = Kalman_Update(&kalman_pitch, pitch_acc, gy, dt);
         } else {
-            roll  = Kalman_PredictOnly(&kalman_roll,  imuRaw.gyro_x, dt);
-            pitch = Kalman_PredictOnly(&kalman_pitch, imuRaw.gyro_y, dt);
+            roll  = Kalman_PredictOnly(&kalman_roll,  gx, dt);
+            pitch = Kalman_PredictOnly(&kalman_pitch, gy, dt);
         }
 
         SAL_CoreCriticalEnter();
         g_IMUData.roll  = clamp(roll,  -70.0f, 70.0f);
         g_IMUData.pitch = clamp(pitch, -70.0f, 70.0f);
-
-        // ✅ gyro raw 저장 (deg/s라고 가정)
         g_IMUData.gyro_x = imuRaw.gyro_x;
         g_IMUData.gyro_y = imuRaw.gyro_y;
         g_IMUData.gyro_z = imuRaw.gyro_z;
-
-        // ✅ accel raw 저장
         g_IMUData.accel_x = imuRaw.accel_x;
         g_IMUData.accel_y = imuRaw.accel_y;
         g_IMUData.accel_z = imuRaw.accel_z;
-
         SAL_GetTickCount(&g_IMUData.last_update_time);
         SAL_CoreCriticalExit();
 
         // ========== 3-1. 안정화 대기 ==========
         if (imu_sample_count < STABILIZATION_SAMPLES) {
+            // ✅ 50샘플마다만 출력 (0.5초마다)
             if (imu_sample_count % 50 == 0) {
-                mcu_printf("[STABIL] %lu/%lu samples...\n",
+                mcu_printf("  [STABIL] %lu/%lu samples | Roll: ",
                         (unsigned long)imu_sample_count, (unsigned long)STABILIZATION_SAMPLES);
+                Print_Float_Value(roll, 10);
+                mcu_printf(" Pitch: ");
+                Print_Float_Value(pitch, 10);
+                mcu_printf("\n");
             }
             Servo_SetPulseAllNs(servo_pulse_ns);
             SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
@@ -1310,9 +1388,8 @@ void IMU_Suspension_Task(void *pArg)
         }
 
         if (imu_sample_count == STABILIZATION_SAMPLES) {
-            mcu_printf("\n[STABIL] Complete! Starting control...\n\n");
+            mcu_printf("\n[STABIL] Complete! Control starting...\n\n");
 
-            /* ✅ 이제부터 모니터링 로그 출력 허용 */
             SAL_CoreCriticalEnter();
             g_SYSTEM_READY = 1;
             SAL_CoreCriticalExit();
@@ -1425,28 +1502,20 @@ void IMU_Suspension_Task(void *pArg)
         float leveling[4] = {0, 0, 0, 0};
 
         if (leveling_on) {
-            /* ✅ 1) boost 로직 개선 - 언덕에서 더 강하게 */
+            /* boost & gain scaling (기존 유지) */
             float boost = 1.0f;
-            if (total_tilt > 12.0f) boost = 2.0f;      // 큰 경사
-            else if (total_tilt > 6.0f) boost = 1.6f;  // 중간 경사
-            else if (total_tilt > 3.0f) boost = 1.3f;  // 작은 경사
+            if (total_tilt > 12.0f) boost = 2.0f;
+            else if (total_tilt > 6.0f) boost = 1.6f;
+            else if (total_tilt > 3.0f) boost = 1.3f;
 
-            /* ✅ 2) gain scaling 수정 - 언덕에서는 풀 파워! */
             float leveling_gain_scale;
-
-            // 기존: 0.3 + 0.7*soft_w
             if (on_slope) {
-                 // 언덕이면 무조건 100%
-                 leveling_gain_scale = 1.0f;
-             } else {
-                 // 평지에서만 soft scaling 적용
-                 leveling_gain_scale = (0.3f + 0.7f * soft_w);  // 최소 30%
+                leveling_gain_scale = 1.0f;
+            } else {
+                leveling_gain_scale = (0.3f + 0.7f * soft_w);
             }
 
-            float roll_height_mm  = angle_to_height_mm(roll,  TRACK_WIDTH_MM * 0.5f);
-            float pitch_height_mm = angle_to_height_mm(pitch, WHEELBASE_MM * 0.5f);
-
-            // 진동 감지 (기존 로직 유지)
+            /* 진동 감지 (기존 유지) */
             static float prev_roll_f=0, prev_pitch_f=0;
             static float prev_dr=0, prev_dp=0;
             static int osc_count=0;
@@ -1461,16 +1530,18 @@ void IMU_Suspension_Task(void *pArg)
             prev_roll_f = roll; prev_pitch_f = pitch;
             prev_dr = dr; prev_dp = dp;
 
-            // ✅ 3) 진동 감쇠 - 평지에서만 적용
             float osc_damping = 1.0f;
             if (!on_slope && osc_count > 0) {
-                osc_damping = 0.4f;  // 평지 진동만 감쇠
+                osc_damping = 0.4f;
             }
 
-            /* ✅ 핵심: PID 계산 */
+            /* PID 계산 (기존 유지) */
+            float roll_height_mm  = angle_to_height_mm(roll,  TRACK_WIDTH_MM * 0.5f);
+            float pitch_height_mm = angle_to_height_mm(pitch, WHEELBASE_MM * 0.5f);
+
             compute_leveling_pid(&pid_roll,  LEVELING_SIGN_ROLL  * roll_height_mm,  dt, on_slope);
             compute_leveling_pid(&pid_pitch, LEVELING_SIGN_PITCH * pitch_height_mm, dt, on_slope);
-            
+
             float roll_ctrl_mm  = pid_roll.output  * boost * leveling_gain_scale * osc_damping;
             float pitch_ctrl_mm = pid_pitch.output * boost * leveling_gain_scale * osc_damping;
 
@@ -1481,13 +1552,13 @@ void IMU_Suspension_Task(void *pArg)
             roll_ctrl_deg  = clamp(roll_ctrl_deg,  -max_deg, max_deg);
             pitch_ctrl_deg = clamp(pitch_ctrl_deg, -max_deg, max_deg);
 
-            // 4바퀴 배분
-            
+            // ✅ STM32 방식: 각 바퀴 독립 계산!
+
             leveling[0] = -roll_ctrl_deg + pitch_ctrl_deg;  // FL
             leveling[1] = +roll_ctrl_deg + pitch_ctrl_deg;  // FR
             leveling[2] = -roll_ctrl_deg - pitch_ctrl_deg;  // RL
             leveling[3] = +roll_ctrl_deg - pitch_ctrl_deg;  // RR
-
+            
             for (uint8 i = 0; i < 4; i++) {
                 leveling[i] = clamp(leveling[i], -max_deg, max_deg);
             }
@@ -1796,8 +1867,8 @@ void Monitoring_Task(void *pArg) {
         mcu_printf("\n");
         
         // ADXL last update
-        mcu_printf("[ADXL] last_update: %u (age %u ms)\n", 
-                   (unsigned int)adxl_t, (unsigned int)(now - adxl_t));
+        mcu_printf("[ADXL] last_update: %d (age %d ms)\n", 
+                   (int)adxl_t, (int)(now - adxl_t));
         
         // IMU Raw gyro
         mcu_printf("[IMU_RAW] gyro(dps) x: ");
@@ -1851,6 +1922,7 @@ static void ADXL345_Monitor_Task(void *pArg)
     uint32 sample_cnt = 0;
 
     mcu_printf("[ADXL345] Task Started (100Hz)\n");
+
     mcu_printf("[ADXL345] Neutral calibration for 3 seconds...\n");
 
     /* ✅ 시스템 준비 플래그가 1 되기 전까지는 "캘리브 모드"로 bias를 만든다 */
@@ -1872,7 +1944,22 @@ static void ADXL345_Monitor_Task(void *pArg)
         sample_cnt++;
 
         if ((sample_cnt % 50) == 0) {
-            mcu_printf("  ADXL calib: %lu/%lu\n", (unsigned long)sample_cnt, (unsigned long)CAL_SAMPLES);
+            // 현재 평균값 계산
+            float avg_z[4];
+            for(uint8 i = 0; i < 4; i++) {
+                avg_z[i] = (float)(sum_z[i] / (double)sample_cnt);
+            }
+            
+            mcu_printf("  [ADXL %d/%d] AVG_Z: ",
+                       (int)sample_cnt, (int)CAL_SAMPLES);
+            Print_Float_Value(avg_z[0], 10);
+            mcu_printf("/");
+            Print_Float_Value(avg_z[1], 10);
+            mcu_printf("/");
+            Print_Float_Value(avg_z[2], 10);
+            mcu_printf("/");
+            Print_Float_Value(avg_z[3], 10);
+            mcu_printf(" m/s2\n");
         }
 
         uint32 now;
@@ -1894,11 +1981,32 @@ static void ADXL345_Monitor_Task(void *pArg)
     g_ADXL_CAL_DONE = 1;
     SAL_CoreCriticalExit();
 
-    mcu_printf("[ADXL345] Bias calibration done.\n");
-    mcu_printf("  FL bias z: "); Print_Float_Value(g_ADXL_bias_z[0], 100); mcu_printf("\n");
-    mcu_printf("  FR bias z: "); Print_Float_Value(g_ADXL_bias_z[1], 100); mcu_printf("\n");
-    mcu_printf("  RL bias z: "); Print_Float_Value(g_ADXL_bias_z[2], 100); mcu_printf("\n");
-    mcu_printf("  RR bias z: "); Print_Float_Value(g_ADXL_bias_z[3], 100); mcu_printf("\n");
+    mcu_printf("\n[ADXL345] Calibration complete!\n");
+    mcu_printf("  FL bias(x/y/z): ");
+    Print_Float_Value(g_ADXL_bias_x[0], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_y[0], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_z[0], 100);
+    mcu_printf("\n  FR bias(x/y/z): ");
+    Print_Float_Value(g_ADXL_bias_x[1], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_y[1], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_z[1], 100);
+    mcu_printf("\n  RL bias(x/y/z): ");
+    Print_Float_Value(g_ADXL_bias_x[2], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_y[2], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_z[2], 100);
+    mcu_printf("\n  RR bias(x/y/z): ");
+    Print_Float_Value(g_ADXL_bias_x[3], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_y[3], 100);
+    mcu_printf("/");
+    Print_Float_Value(g_ADXL_bias_z[3], 100);
+    mcu_printf("\n");
 
     SAL_TaskSleep(100);
 
