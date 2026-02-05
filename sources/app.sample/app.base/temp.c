@@ -121,7 +121,7 @@
 #define OVERSPEED_THRESHOLD         (95.0f)     // %
 #define IMU_TIMEOUT_MS              (100)       // ms
 #define CAN_TIMEOUT_MS              (500)       // ms
-#define SLOPE_ANGLE_THRESHOLD       (25.0f)     // °
+#define SLOPE_ANGLE_THRESHOLD       (8.0f)     // °
 #define SLOPE_VARIANCE_THRESHOLD    (5.0f)      // °
 
 // Safety Levels
@@ -453,6 +453,8 @@ static void AppTaskCreate(void);
 static void DisplayAliveLog(void);
 static void DisplayOTPInfo(void);
 
+static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uint8 on_slope, uint8 saturated);
+
 
 /*
 ***************************************************************************************************
@@ -545,31 +547,26 @@ static float height_to_servo_deg(float height_mm, float max_angle_deg) {
     return height_mm * scale;
 }
 
-static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uint8 on_slope)
+static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uint8 on_slope, uint8 saturated)
 {
     pid->error = error;
-    
+
     // ✅ 추가: 장시간 카운터
     static uint32 small_error_cycles = 0;
-    
-    // 정지/소각도에서 적분 리셋
+
+    // 정지/소각도에서 적분 리셋 (기존 로직 유지)
     if (!on_slope) {
-        if (fabsf(error) < 3.0f) {  // 3mm = 약 1.4도
-            pid->integral *= 0.50f;
-            
-            if (fabsf(pid->integral) < 0.5f) {
+        if (fabsf(error) < 1.0f) {  // ✅ 3.0f -> 1.0f (더 평평하게 유지)
+            pid->integral *= 0.70f; // ✅ 0.50f -> 0.70f (덜 죽이기)
+            if (fabsf(pid->integral) < 0.3f) {
                 pid->integral = 0.0f;
             }
         }
-        
-        // ✅ 추가: 2도 이하가 오래 지속되면 강제 감소
-        if (fabsf(error) < 4.0f) {  // 2도 이하
+
+        if (fabsf(error) < 4.0f) {
             small_error_cycles++;
-            
-            // 10초 이상 (1000 cycles @ 100Hz)
             if (small_error_cycles > 1000) {
-                pid->integral *= 0.95f;  // 천천히 감소
-                
+                pid->integral *= 0.95f;
                 if (fabsf(pid->integral) > 15.0f) {
                     mcu_printf("[WARN] Long-term integral high: ");
                     Print_Float_Value(pid->integral, 10);
@@ -578,7 +575,7 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
                 }
             }
         } else {
-            small_error_cycles = 0;  // 리셋
+            small_error_cycles = 0;
         }
     }
 
@@ -589,28 +586,21 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
         small_error_cycles = 0;
     }
 
-    // 적분 활성화
-    float i_enable = on_slope ? 3.0f : 5.0f;  // 4.0 → 5.0
-    
-    if (fabsf(error) > i_enable) {
-        pid->integral += error * dt;
-        pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+    // ✅ 핵심: 포화면 적분을 쌓지 말고 줄이기(anti-windup)
+    if (saturated) {
+        pid->integral *= 0.90f;   // back-off
         small_error_cycles = 0;
     } else {
-        pid->integral *= 0.95f;
-        if (fabsf(pid->integral) < 0.2f) {
-            pid->integral = 0.0f;
-        }
-    }
-
-    // ✅ 추가: 복귀 감지 (기울기 감소 중 + 적분 많이 쌓임)
-    if (fabsf(error) < 10.0f && fabsf(pid->integral) > 15.0f) {
-        // 에러 감소 중인데 적분이 많이 남아있으면
-        float error_rate = (pid->prev_error - error) / dt;
-        
-        // 복귀 중이면 (에러가 빠르게 줄어들면)
-        if (fabsf(error_rate) > 50.0f) {
-            pid->integral *= 0.70f;  // 적분 30% 감소
+        float i_enable = on_slope ? 3.0f : 5.0f;
+        if (fabsf(error) > i_enable) {
+            pid->integral += error * dt;
+            pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
+            small_error_cycles = 0;
+        } else {
+            pid->integral *= 0.95f;
+            if (fabsf(pid->integral) < 0.2f) {
+                pid->integral = 0.0f;
+            }
         }
     }
 
@@ -619,21 +609,6 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
         (pid->prev_error < -2.0f && error >  2.0f)) {
         pid->integral *= 0.3f;
         small_error_cycles = 0;
-    }
-
-    // 급격한 개선
-    float error_rate = (pid->prev_error - error) / dt;
-    if (fabsf(error_rate) > 100.0f && fabsf(pid->integral) > 2.0f) {
-        pid->integral *= 0.5f;
-        small_error_cycles = 0;
-    }
-
-    // ✅ 적분 상한 경고
-    if (fabsf(pid->integral) > INTEGRAL_MAX * 0.8f) {
-        mcu_printf("[WARN] PID integral high: ");
-        Print_Float_Value(pid->integral, 10);
-        mcu_printf("\n");
-        pid->integral *= 0.75f;
     }
 
     // Derivative with LPF
@@ -647,6 +622,14 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
     pid->output = error * LEVELING_GAIN +
                   pid->integral * INTEGRAL_GAIN +
                   pid->derivative * DERIVATIVE_GAIN;
+
+    // ✅ 적분 상한 경고(기존 유지)
+    if (fabsf(pid->integral) > INTEGRAL_MAX * 0.8f) {
+        mcu_printf("[WARN] PID integral high: ");
+        Print_Float_Value(pid->integral, 10);
+        mcu_printf("\n");
+        pid->integral *= 0.75f;
+    }
 }
 
 
@@ -1505,13 +1488,19 @@ void IMU_Suspension_Task(void *pArg)
         // ========== 6. ADXL 읽기 + LPF + Pre-kick ==========
         float wheel_accel_z[4];
         float wheel_impact[4];
+        float wheel_ax[4], wheel_ay[4], wheel_az[4];
 
         SAL_CoreCriticalEnter();
         for (uint8 i = 0; i < 4; i++) {
+            wheel_ax[i]      = g_ADXLData.accel_x[i];
+            wheel_ay[i]      = g_ADXLData.accel_y[i];
+            wheel_az[i]      = g_ADXLData.accel_z[i];
+
             wheel_accel_z[i] = g_ADXLData.accel_z[i];
-            wheel_impact[i]  = g_ADXLData.impact_detected[i];   // ✅ 추가
+            wheel_impact[i]  = g_ADXLData.impact_detected[i];
         }
         SAL_CoreCriticalExit();
+
 
         // LPF 계수
         float tau   = 1.0f / (2.0f * M_PI * LPF_CUTOFF_FREQ);
@@ -1695,9 +1684,19 @@ void IMU_Suspension_Task(void *pArg)
             float roll_height_mm  = angle_to_height_mm(roll,  TRACK_WIDTH_MM * 0.5f);
             float pitch_height_mm = angle_to_height_mm(pitch, WHEELBASE_MM * 0.5f);
 
-            compute_leveling_pid(&pid_roll,  LEVELING_SIGN_ROLL  * roll_height_mm,  dt, on_slope);
-            compute_leveling_pid(&pid_pitch, LEVELING_SIGN_PITCH * pitch_height_mm, dt, on_slope);
+   
+            // ✅ anti-windup용 포화 판단: 현재 leveling 범위 기반
+            float max_deg_aw = MAX_CORRECTION_DEG * range_limit;
 
+            // "에러가 너무 커서 출력이 포화될 가능성"이 높으면 saturated로 간주
+            uint8 sat_roll  = (fabsf(roll_height_mm)  > angle_to_height_mm(25.0f, TRACK_WIDTH_MM * 0.5f) * range_limit) ? 1U : 0U;
+            uint8 sat_pitch = (fabsf(pitch_height_mm) > angle_to_height_mm(25.0f, WHEELBASE_MM * 0.5f)  * range_limit) ? 1U : 0U;
+
+            (void)max_deg_aw; // 경고 방지(필요 없으면 지워도 됨)
+
+            compute_leveling_pid(&pid_roll,  LEVELING_SIGN_ROLL  * roll_height_mm,  dt, on_slope, sat_roll);
+            compute_leveling_pid(&pid_pitch, LEVELING_SIGN_PITCH * pitch_height_mm, dt, on_slope, sat_pitch);
+                     
             float roll_ctrl_mm  = pid_roll.output  * boost * leveling_gain_scale * osc_damping;
             float pitch_ctrl_mm = pid_pitch.output * boost * leveling_gain_scale * osc_damping;
 
@@ -1719,6 +1718,30 @@ void IMU_Suspension_Task(void *pArg)
                 leveling[i] = clamp(leveling[i], -max_deg, max_deg);
             }
             
+            // ✅ (선택) 코너별 ADXL 저주파 tilt를 살짝 섞어서 "독립감" 추가
+            #define LOCAL_BLEND  (0.25f)   // 0.15~0.35
+            #define LOCAL_GAIN   (0.8f)
+
+            static float adxl_roll_lpf[4]  = {0};
+            static float adxl_pitch_lpf[4] = {0};
+
+            // 느린 LPF (코너 기울기만)
+            float a_alpha = 0.05f;
+
+            for (uint8 i = 0; i < 4; i++) {
+                float r = atan2f(wheel_ay[i], wheel_az[i]) * 180.0f / M_PI;
+                float p = atan2f(-wheel_ax[i],
+                                sqrtf(wheel_ay[i]*wheel_ay[i] + wheel_az[i]*wheel_az[i])) * 180.0f / M_PI;
+
+                adxl_roll_lpf[i]  += a_alpha * (r - adxl_roll_lpf[i]);
+                adxl_pitch_lpf[i] += a_alpha * (p - adxl_pitch_lpf[i]);
+
+                float local = (-adxl_roll_lpf[i]) + (+adxl_pitch_lpf[i]);
+
+                leveling[i] = (1.0f - LOCAL_BLEND) * leveling[i] +
+                            (LOCAL_BLEND) * (LOCAL_GAIN * local);
+            }
+
             // ✅ 새로 추가: 서보 한계 감지
             static uint8 servo_saturated_count = 0;
             uint8 any_saturated = 0;
