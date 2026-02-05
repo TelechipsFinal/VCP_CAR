@@ -24,4 +24,5 @@ INCLUDES += -I$(MCU_BSP_DEV_DRIVERS_GPSB_PATH)/$(MCU_BSP_CHIPSET_FAMILY_NAME)
 # Sources
 SRCS += gpsb.c
 SRCS += gpsb_reg.c
-#SRCS += dot_matrix.c
+SRCS += ICM_20948.c
+SRCS += ADXL345.c

@@ -21,7 +21,7 @@
 #define ICM_20948_GPIO_FUNC   1
 
 // DMA Buffer Size
-#define ICM20948_DMA_BUF_SIZE   256
+#define ICM20948_DMA_BUF_SIZE   64
 
 /* ICM-20948 Bank register */
 #define ICM20948_REG_BANK_SEL       0x7F
@@ -44,7 +44,8 @@
 /* ICM-20948 Device-ID */
 #define ICM20948_DEVICE_ID          0xEA
 
-void Print_Float_Value(float value, uint32 scale);
+#include <sal_com.h>
+
 void ICM_20948_SelectBank(uint8 bank);
 void ICM_20948_Write(uint8 addr, uint8 data);
 uint8 ICM_20948_Read(uint8 addr);
@@ -66,6 +67,7 @@ typedef struct {
     float filtered_roll;
     float filtered_pitch;
 } IMU_Data;
+
 
 extern uint32 DMA_Semaphore_ID;
 extern IMU_Data IMU;

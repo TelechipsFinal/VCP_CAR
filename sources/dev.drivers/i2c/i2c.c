@@ -29,6 +29,37 @@
 /*************************************************************************************************/
 
 static uint8                            dummy;
+static uint32                           g_i2c_global_sem;
+static uint8                            g_i2c_global_sem_init = 0U;
+static const uint8                      g_i2c_global_sem_name[] = "I2C_GLOBAL";
+
+static void I2C_DumpStatus(uint8 ucCh, const char *tag)
+{
+    if (i2c[ucCh].dBase < (UINT_MAX_VALUE - I2C_SR)) {
+        uint32 sr = SAL_ReadReg((uint32)(i2c[ucCh].dBase + I2C_SR));
+        mcu_printf("[I2C][%s] ch=%d SR=0x%08X\n", tag, ucCh, sr);
+    }
+}
+
+static SALRetCode_t I2C_GlobalLock(void)
+{
+    if (g_i2c_global_sem_init == 0U) {
+        if (SAL_SemaphoreCreate(&g_i2c_global_sem, g_i2c_global_sem_name, 1, SAL_OPT_BLOCKING) == SAL_RET_SUCCESS) {
+            g_i2c_global_sem_init = 1U;
+        } else {
+            return SAL_RET_FAILED;
+        }
+    }
+
+    return SAL_SemaphoreWait(g_i2c_global_sem, 50, SAL_OPT_BLOCKING);
+}
+
+static void I2C_GlobalUnlock(void)
+{
+    if (g_i2c_global_sem_init != 0U) {
+        (void)SAL_SemaphoreRelease(g_i2c_global_sem);
+    }
+}
 
 /*
 ***************************************************************************************************
@@ -415,6 +446,7 @@ static void I2C_Reinit
     SALRetCode_t    ret;
 
     ret = SAL_RET_SUCCESS;
+    I2C_DumpStatus(ucCh, "XFER_SYNC_START");
 
     if (ucCh > (uint32)I2C_CH_NUM)
     {
@@ -607,6 +639,7 @@ static SALRetCode_t I2C_ProcessAckFail
 
     if(ret != SAL_RET_SUCCESS)
     {
+        I2C_DumpStatus(ucCh, "STOP_FAIL");
         I2C_D("%s: i2c ch %d received NACK from 0x%x\n", __func__, ucCh, (ucSlaveAddr)>>1UL);
     }
 
@@ -676,6 +709,7 @@ static SALRetCode_t I2C_CheckValidXfer
 
         if(ret != SAL_RET_SUCCESS)
         {
+            I2C_DumpStatus(ucCh, "ACK_FAIL");
             ret = I2C_ProcessAckFail(ucCh, ucSlaveAddr);
         }
     }
@@ -907,6 +941,14 @@ static SALRetCode_t I2C_XferSync
                         }
                     }
                 }
+                else
+                {
+                    I2C_DumpStatus(ucCh, "RD_ACK_FAIL");
+                }
+            }
+            else
+            {
+                I2C_DumpStatus(ucCh, "RD_WAIT_FAIL");
             }
         }
     }
@@ -1010,6 +1052,9 @@ SALRetCode_t I2C_Xfer
     SALRetCode_t    ret;
 
     ret = SAL_RET_SUCCESS;
+    if (I2C_GlobalLock() != SAL_RET_SUCCESS) {
+        return SAL_RET_FAILED;
+    }
     (void)SAL_CoreCriticalEnter();
 
     if(i2c[ucCh].dState != I2C_STATE_IDLE)
@@ -1038,6 +1083,7 @@ SALRetCode_t I2C_Xfer
         }
     }
 
+    I2C_GlobalUnlock();
     return ret;
 }
 
@@ -1068,6 +1114,9 @@ SALRetCode_t I2C_XferCmd
     SALRetCode_t    ret;
 
     ret = SAL_RET_SUCCESS;
+    if (I2C_GlobalLock() != SAL_RET_SUCCESS) {
+        return SAL_RET_FAILED;
+    }
     (void)SAL_CoreCriticalEnter();
 
     if(i2c[ucCh].dState != I2C_STATE_IDLE)
@@ -1104,6 +1153,7 @@ SALRetCode_t I2C_XferCmd
         }
     }
 
+    I2C_GlobalUnlock();
     return ret;
 }
 
@@ -2131,4 +2181,3 @@ void I2C_Deinit
 }
 
 #endif  // ( MCU_BSP_SUPPORT_DRIVER_I2C == 1 )
-

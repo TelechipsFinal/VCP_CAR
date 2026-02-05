@@ -860,6 +860,16 @@ static SALRetCode_t GPSB_SetPort
     {
         gpsb[uiCh].dPort = port;
         GPSB_D("%s: GPSB port 0x%x\n", __func__, gpsb[uiCh].dPort);
+        mcu_printf("[GPSB] ch=%d port=%d sclk=0x%08X cs=0x%08X sdo=0x%08X sdi=0x%08X func=%d perisel=%d perich=%d\n",
+                   uiCh,
+                   port,
+                   gpsbport[port][GPSB_SCLK],
+                   gpsbport[port][GPSB_CS],
+                   gpsbport[port][GPSB_SDO],
+                   gpsbport[port][GPSB_SDI],
+                   (int)gpsbport[port][GPSB_FUNC],
+                   (int)gpsbport[port][GPSB_PERISEL],
+                   (int)gpsbport[port][GPSB_PERICH]);
     }
     else
     {
@@ -4124,4 +4134,3 @@ void GPSB_ClearDMABuffer(uint8 uiCh, uint32 size)
 }
 
 #endif  // ( MCU_BSP_SUPPORT_DRIVER_GPSB == 1 )
-
