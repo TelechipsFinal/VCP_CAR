@@ -22,10 +22,7 @@
 #include "sal_internal.h"
 #include "bsp.h"
 #include "pmio.h"
-<<<<<<< HEAD
-#include "motor_drive.h"
-=======
->>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
+#include "motor_control.h"
 
 /*
 ***************************************************************************************************
@@ -412,15 +409,23 @@ void PDM_SelectTestCase
             break;
         }
 
-<<<<<<< HEAD
         case    5:
         {
-            MotorDrive_L298NTest();
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+            uint32 speed;
+
+            MotorControl_Init();
+            for(speed = 200U; speed <= 800U; speed += 200U)
+            {
+                MotorControl_SetSpeed(speed);
+                PDM_TestSleepForSec(2U);
+            }
+            MotorControl_SetSpeed(0U);
+#else
+            mcu_printf("\n== Motor control is disabled ==\n");
+#endif
             break;
         }
-
-=======
->>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
         default :
         {
             mcu_printf("\n== Invaild Test Case ==\n");
@@ -432,7 +437,3 @@ void PDM_SelectTestCase
 }
 
 #endif  // ( MCU_BSP_SUPPORT_TEST_APP_PDM == 1 )
-<<<<<<< HEAD
-=======
-
->>>>>>> 42751a94e87fd7818ed9565993e97421c1eabd81
