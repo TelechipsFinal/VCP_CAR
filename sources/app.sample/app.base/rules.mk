@@ -15,6 +15,7 @@ MCU_BSP_APP_SAMPLE_BASE_PATH := $(MCU_BSP_BUILD_CURDIR)
 
 # Flags
 COMMON_FLAGS += -DMCU_BSP_SUPPORT_APP_BASE=1
+COMMON_FLAGS += -DMCU_BSP_SUPPORT_MOTOR_PDM=1
 
 # Paths
 VPATH += $(MCU_BSP_APP_SAMPLE_BASE_PATH)
@@ -25,6 +26,8 @@ INCLUDES += -I$(MCU_BSP_APP_SAMPLE_BASE_PATH)/$(MCU_BSP_CHIPSET_FAMILY_NAME)
 
 # Sources
 SRCS += main.c
+SRCS += motor_control.c
+SRCS += can_control.c
 SRCS += kalman_filter.c
 SRCS += printf_float.c
 SRCS += imu_calibration.c

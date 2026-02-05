@@ -66,4 +66,3 @@ void PDM_SelectTestCase
 #endif  // ( MCU_BSP_SUPPORT_TEST_APP_PDM == 1 )
 
 #endif  // MCU_BSP_PDM_TEST_HEADER
-

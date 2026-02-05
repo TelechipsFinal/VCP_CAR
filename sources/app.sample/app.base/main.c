@@ -53,6 +53,7 @@
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     #include <can_demo.h>
+    #include <can_control.h>
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_IDLE == 1 )
@@ -812,6 +813,10 @@ void Main_StartTask(void * pArg)
     
     // Main task finished
     while(1) {
+        #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
+          CAN_ControlPoll();
+          CAN_ControlSendSpeed();
+        #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
         SAL_TaskSleep(1000);
     }
     
@@ -2077,6 +2082,7 @@ static void AppTaskCreate(void)
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     CAN_DemoCreateApp();
+    CAN_ControlInit(0U);  // Channel 0 모니터링
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_FW_UPDATE == 1 )
