@@ -144,3 +144,6 @@ compile: ../../../sources/app.sample/app.base/ADXL345_test.c
 compile: ../../../sources/app.sample/app.can.demo/can_demo.c
 compile: ../../../sources/app.sample/test.app.pdm/pdm_test.c
 compile: ../../../sources/dev.drivers/gpsb/ADXL345.c
+compile: ../../../sources/app.sample/app.base/main.c
+compile: ../../../sources/app.sample/app.console/console.c
+compile: ../../../sources/app.sample/app.base/main.c

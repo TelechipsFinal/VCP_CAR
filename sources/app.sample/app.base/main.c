@@ -1744,12 +1744,15 @@ void IMU_Suspension_Task(void *pArg)
         // ✅ height 읽기 (전체 차고 조정) - 한 번만 선언!
         SAL_CoreCriticalEnter();
         float height = g_HeightData.height_offset;
+        DriveMode_t current_mode = g_DriveMode;  // ✅ 추가
         SAL_CoreCriticalExit();
+
+        float raw_target_scale = g_DriveModeRawTargetScale[(uint8)current_mode];  // ✅ 추가
 
         float target_deg[4];
 
         // 9-1) raw target 만들기
-        // ✅ 각 바퀴 독립 제어 (STM32 방식)
+        // ✅ 각 바퀴 독립 제어 (STM32 방식 + 모드별 스케일)
         for (uint8 i = 0; i < 4; i++) {
             // 1. 댐핑 (바퀴별 진동 억제)
             float damp_deg = wheel_damping[i] * DAMPING_VEL_TO_DEG;
@@ -1757,16 +1760,21 @@ void IMU_Suspension_Task(void *pArg)
             // 2. 프리킥 (충격 선제 대응)
             float kick_deg = adxl_pre_kick[i];
             
-            // 3. 최종 목표 = 차고(height) + 레벨링 + 댐핑 + 프리킥
-            //    ⭐ height가 중립점 역할을 함
-            float raw_target = height + leveling[i] + damp_deg + kick_deg;
+            // 3. 레벨링 + 댐핑 + 프리킥 (모드별 스케일 적용!)
+            //    COMFORT: 1.2배 (부드럽게 큰 움직임)
+            //    NORMAL: 1.0배 (정상)
+            //    SPORT: 0.8배 (단단하게 작은 움직임)
+            float control_output = (leveling[i] + damp_deg + kick_deg) * raw_target_scale;
             
-            // 4. 범위 제한
-            float max_offset = SERVO_CMD_DEG_LIMIT  * range_limit;
+            // 4. 최종 목표 = 차고(height) + 제어 출력
+            //    ⭐ height가 중립점 역할을 함
+            float raw_target = height + control_output;
+            
+            // 5. 범위 제한
+            float max_offset = SERVO_CMD_DEG_LIMIT * range_limit;
             raw_target = clamp(raw_target, -max_offset, max_offset);
             target_deg[i] = raw_target;
         }
-
         // 9-2) 상황별 rate(deg/sec) 선택
         total_tilt = fabsf(roll) + fabsf(pitch);
 
