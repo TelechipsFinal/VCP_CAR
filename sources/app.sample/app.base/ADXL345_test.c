@@ -12,6 +12,9 @@
 
 static SALRetCode_t ADXL345_ReadRegStable(uint8 dev, uint8 reg, uint8 *val);
 static SALRetCode_t ADXL345_WriteVerify(uint8 dev, uint8 reg, uint8 val, uint8 retries, uint32 delay_ms);
+static const char *g_wheel_name[ADXL_COUNT] = {
+    "FL", "RL", "RR", "FR"   // 네가 말한 순서대로 매핑 (필요하면 바꿔)
+};
 
 
 static SALRetCode_t ADXL345_ReadRegStable(uint8 dev, uint8 reg, uint8 *val)
@@ -126,47 +129,74 @@ void ADXL345_Test_Task(void *pArg)
 
     mcu_printf("\n");
 
-    /* ========== TEST 3: Live read all sensors for 5 seconds ========== */
-    mcu_printf("[TEST 3] Live Read ADXL0~3 (5 sec)\n");
+    /* ========== TEST 3: Impact-only read all sensors for 10 seconds ========== */
+    mcu_printf("[TEST 3] Impact Event Only (10 sec, > %.2fG)\n", IMPACT_THRESHOLD_G);
     mcu_printf("=========================================\n");
 
     {
         uint32 start, now;
         float x, y, z;
+        float prev_mag[ADXL_COUNT] = {0};
+        uint32 last_hit_ms[ADXL_COUNT] = {0};
 
         SAL_GetTickCount(&start);
 
-        // TEST 3 부분 수정
-while (1) {
-    SAL_GetTickCount(&now);
-    if ((now - start) >= 5000U) break;
-
-    for (dev = 0; dev < ADXL_COUNT; dev++) {
-        if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
-            mcu_printf("  [ADXL%d] MUX select failed\n", dev);
-            continue;
+        /* 초기 prev_mag 세팅 */
+        for (dev = 0; dev < ADXL_COUNT; dev++) {
+            if (ADXL_MuxSelectByDev(dev) == SAL_RET_SUCCESS) {
+                if (ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
+                    prev_mag[dev] = sqrtf(x*x + y*y + z*z);
+                }
+            }
+            SAL_TaskSleep(5);
         }
 
-        // ✅ ReadAccelCalibrated 사용
-        if (ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
-            float mag = sqrtf((x*x) + (y*y) + (z*z));
-            mcu_printf("  [%4d ms][ADXL%d] X:", (int)(now - start), dev);
-            Print_Float_Value(x, 100);
-            mcu_printf(" Y:");
-            Print_Float_Value(y, 100);
-            mcu_printf(" Z:");
-            Print_Float_Value(z, 100);
-            mcu_printf(" |A|:");
-            Print_Float_Value(mag, 100);
-            mcu_printf(" m/s^2\n");
-        } else {
-            mcu_printf("  [%4d ms][ADXL%d] [ERROR] ReadAccel failed\n",
-                       (int)(now - start), dev);
-        }
-    }
+        while (1) {
+            SAL_GetTickCount(&now);
+            if ((now - start) >= 10000U) break;   // 10초
 
-    SAL_TaskSleep(50);
-}
+            for (dev = 0; dev < ADXL_COUNT; dev++) {
+
+                if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
+                    continue;
+                }
+
+                if (ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
+
+                    float mag   = sqrtf(x*x + y*y + z*z);
+                    float delta = fabsf(mag - prev_mag[dev]);
+
+                    /* 임팩트 판정 + 쿨다운 */
+                    if (delta >= IMPACT_THRESHOLD_MS2) {
+                        uint32 tms = (now - start);
+
+                        if ((tms - last_hit_ms[dev]) >= IMPACT_COOLDOWN_MS) {
+                            last_hit_ms[dev] = tms;
+
+                            mcu_printf("  [IMPACT][%4d ms][ADXL%d", (int)tms, dev);
+#ifdef ADXL_COUNT
+                            mcu_printf("/%s", g_wheel_name[dev]);   // 휠명 출력 (선택)
+#endif
+                            mcu_printf("] Δ|A|:");
+                            Print_Float_Value(delta / G_TO_MS2, 100);
+                            mcu_printf(" G  |A|:");
+                            Print_Float_Value(mag / G_TO_MS2, 100);
+                            mcu_printf(" G  X:");
+                            Print_Float_Value(x / G_TO_MS2, 100);
+                            mcu_printf(" Y:");
+                            Print_Float_Value(y / G_TO_MS2, 100);
+                            mcu_printf(" Z:");
+                            Print_Float_Value(z / G_TO_MS2, 100);
+                            mcu_printf(" (G)\n");
+                        }
+                    }
+
+                    prev_mag[dev] = mag;
+                }
+            }
+
+            SAL_TaskSleep(20); // 50ms보다 더 촘촘히 보고 싶으면 20ms 권장
+        }
     }
 
     mcu_printf("\n╔════════════════════════════════════╗\n");

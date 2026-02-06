@@ -11,8 +11,45 @@ static uint8 g_adxl345_i2c_sem_init = 0;
 static const uint8 g_adxl345_i2c_sem_name[] = "ADXL345_I2C";
 ADXL345_Calibration_t g_adxl345_cal[4] = {0};  // 최대 4개 센서 지원
 const uint8 g_adxl_mux_ch[ADXL_COUNT] = { 0, 1, 2, 3 }; // ADXL0~3 -> MUX CH0~3
+static uint32 g_adxl_bus_sem;
+static uint8  g_adxl_bus_sem_init = 0;
+static const uint8 g_adxl_bus_sem_name[] = "ADXL_BUS";
 
 static SALRetCode_t ADXL345_SelectBySensor(uint8 sensor_id);
+
+
+static SALRetCode_t ADXL_BusLock(void)
+{
+    if (g_adxl_bus_sem_init == 0U) {
+        if (SAL_SemaphoreCreate(&g_adxl_bus_sem, g_adxl_bus_sem_name, 1, SAL_OPT_BLOCKING) == SAL_RET_SUCCESS) {
+            g_adxl_bus_sem_init = 1U;
+        } else {
+            return SAL_RET_FAILED;
+        }
+    }
+    return SAL_SemaphoreWait(g_adxl_bus_sem, 50, SAL_OPT_BLOCKING);
+}
+
+static void ADXL_BusUnlock(void)
+{
+    if (g_adxl_bus_sem_init != 0U) {
+        (void)SAL_SemaphoreRelease(g_adxl_bus_sem);
+    }
+}
+
+static SALRetCode_t ADXL345_XferAtomic(uint8 sensor_id, uint8 slave_addr_8bit, I2CXfer_t xfer)
+{
+    SALRetCode_t ret = ADXL_BusLock();
+    if (ret != SAL_RET_SUCCESS) return ret;
+
+    ret = ADXL345_SelectBySensor(sensor_id);
+    if (ret == SAL_RET_SUCCESS) {
+        ret = I2C_Xfer((uint8)ADXL345_I2C_CH, slave_addr_8bit, xfer, 0);
+    }
+
+    ADXL_BusUnlock();
+    return ret;
+}
 
 
 static uint8 ADXL345_I2C_Addr(void)
@@ -102,92 +139,37 @@ SALRetCode_t ADXL345_Test_ReadID(uint8 *devid)
 }
 SALRetCode_t ADXL345_ReadReg(uint8 sensor_id, uint8 reg, uint8 *val)
 {
-    I2CXfer_t xfer = {0};
     uint8 data = 0;
-    SALRetCode_t ret;
+    I2CXfer_t xfer = {0};
 
-    // MUX 선택
-    ret = ADXL345_SelectBySensor(sensor_id);
-    if (ret != SAL_RET_SUCCESS) {
-        return ret;
-    }
-
-    // Step 1: Write register address
-    xfer.xCmdBuf = NULL;
-    xfer.xCmdLen = 0;
-    xfer.xOutBuf = &reg;
-    xfer.xOutLen = 1;
-    xfer.xInBuf = NULL;
-    xfer.xInLen = 0;
-    xfer.xOpt = 0;
-
-    ret = ADXL345_I2C_Xfer(xfer);
-    if (ret != SAL_RET_SUCCESS) {
-        return ret;
-    }
-
-    SAL_TaskSleep(2);
-
-    // Step 2: Read data
-    xfer.xCmdBuf = NULL;
-    xfer.xCmdLen = 0;
+    xfer.xCmdBuf = &reg;   // ✅ register address
+    xfer.xCmdLen = 1;
+    xfer.xInBuf  = &data;  // ✅ read 1 byte
+    xfer.xInLen  = 1;
     xfer.xOutBuf = NULL;
     xfer.xOutLen = 0;
-    xfer.xInBuf = &data;
-    xfer.xInLen = 1;
-    xfer.xOpt = 0;
+    xfer.xOpt    = 0;      // repeated-start 기본 동작
 
-    ret = ADXL345_I2C_Xfer(xfer);
-    
-    if (val) {
-        *val = data;
-    }
-
+    SALRetCode_t ret = ADXL345_XferAtomic(sensor_id, ADXL345_I2C_Addr(), xfer);
+    if (val) *val = data;
     return ret;
 }
+
 SALRetCode_t ADXL345_ReadRegsBurst(uint8 sensor_id, uint8 start_reg, uint8 *buf, uint8 len)
 {
     I2CXfer_t xfer = {0};
-    SALRetCode_t ret;
 
-    // MUX 선택
-    ret = ADXL345_SelectBySensor(sensor_id);
-    if (ret != SAL_RET_SUCCESS) {
-        return ret;
-    }
-
-    // Step 1: Write register address
-    xfer.xCmdBuf = NULL;
-    xfer.xCmdLen = 0;
-    xfer.xOutBuf = &start_reg;
-    xfer.xOutLen = 1;
-    xfer.xInBuf = NULL;
-    xfer.xInLen = 0;
-    xfer.xOpt = 0;
-
-    ret = ADXL345_I2C_Xfer(xfer);
-    if (ret != SAL_RET_SUCCESS) {
-        return ret;
-    }
-
-    SAL_TaskSleep(2);
-
-    // Step 2: Read burst
-    xfer.xCmdBuf = NULL;
-    xfer.xCmdLen = 0;
+    xfer.xCmdBuf = &start_reg;
+    xfer.xCmdLen = 1;
+    xfer.xInBuf  = buf;
+    xfer.xInLen  = len;
     xfer.xOutBuf = NULL;
     xfer.xOutLen = 0;
-    xfer.xInBuf = buf;
-    xfer.xInLen = len;
-    xfer.xOpt = 0;
+    xfer.xOpt    = 0;
 
-    ret = ADXL345_I2C_Xfer(xfer);
-    if (ret != SAL_RET_SUCCESS) {
-        mcu_printf("[ADXL345] ReadBurst fail reg=0x%02X len=%d ret=%d\n", start_reg, len, ret);
-    }
-
-    return ret;
+    return ADXL345_XferAtomic(sensor_id, ADXL345_I2C_Addr(), xfer);
 }
+
 
 SALRetCode_t ADXL345_WriteReg(uint8 sensor_id, uint8 reg, uint8 val)
 {
