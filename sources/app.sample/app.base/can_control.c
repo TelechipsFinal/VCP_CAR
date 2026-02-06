@@ -21,6 +21,7 @@
 #include "can_reg.h"
 #include "can_drv.h"
 #include "debug.h"
+#include "main.h"
 
 #if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
 #include "motor_control.h"
@@ -30,6 +31,11 @@ static CANFlagValue_t gRxFlag = CAN_FLAG_FALSE;
 static uint8 gTargetChannel = 0U;
 static uint32 gLastSpeed = 0U;
 #define CAN_CTRL_STEER_DURATION_MS      (500U)
+
+/* Speed limit hold (non-blocking) */
+static uint8  gSpeedLimitActive = 0U;
+static uint32 gSpeedLimitRestoreTick = 0U;
+static uint32 gSpeedLimitRestoreSpeed = 0U;
 
 static void CAN_ControlCallbackRx
 (
@@ -125,11 +131,20 @@ static void CAN_ControlProcessMessage
                 speed = 1000U;
             }
 
+            if (gSpeedLimitActive != 0U) {
+                mcu_printf("[CAN CTRL] Speed ignored (limit hold active)\n");
+                break;
+            }
+
 #if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
             MotorControl_SetSpeed(speed);
 #endif
             gLastSpeed = speed;
             mcu_printf( "[CAN CTRL] Speed: %d\n", (int)speed );
+
+            if (DriveMode_IsAutoEnabled() != 0U) {
+                DriveMode_UpdateAutoBySpeed(speed);
+            }
             break;
         }
 
@@ -167,6 +182,62 @@ static void CAN_ControlProcessMessage
             else
             {
                 mcu_printf( "[CAN CTRL] Steering unknown: 0x%X\n", psRxMsg->mData[0] );
+            }
+            break;
+        }
+        case CAN_CTRL_ID_DRIVEMODE:
+        {
+            if (psRxMsg->mDataLength == 0U) {
+                mcu_printf("[CAN CTRL] DriveMode empty data (ID: 0x%X)\n", psRxMsg->mId);
+                break;
+            }
+
+            uint8 mode = psRxMsg->mData[0];
+
+            if (mode == 0U) {
+                DriveMode_SetAutoEnabled(1U);
+                DriveMode_UpdateAutoBySpeed(gLastSpeed);
+                mcu_printf("[CAN CTRL] DriveMode: AUTO (speed=%d)\n", (int)gLastSpeed);
+            } else if (mode == 1U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_COMFORT);
+                mcu_printf("[CAN CTRL] DriveMode: COMFORT\n");
+            } else if (mode == 2U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_NORMAL);
+                mcu_printf("[CAN CTRL] DriveMode: NORMAL\n");
+            } else if (mode == 3U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_SPORT);
+                mcu_printf("[CAN CTRL] DriveMode: SPORT\n");
+            } else {
+                mcu_printf("[CAN CTRL] DriveMode unknown: 0x%X\n", mode);
+            }
+            break;
+        }
+        case CAN_CTRL_ID_SPEED_LIMIT:
+        {
+            if (psRxMsg->mDataLength == 0U) {
+                mcu_printf("[CAN CTRL] SpeedLimit empty data (ID: 0x%X)\n", psRxMsg->mId);
+                break;
+            }
+
+            uint8 cmd = psRxMsg->mData[0];
+            if (cmd == 1U) {
+                if (gLastSpeed >= 500U) {
+                    uint32 now;
+                    SAL_GetTickCount(&now);
+
+                    gSpeedLimitActive = 1U;
+                    gSpeedLimitRestoreTick = now + 3000U;
+                    gSpeedLimitRestoreSpeed = gLastSpeed;
+
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+                    MotorControl_SetSpeed(500U);
+#endif
+                    mcu_printf("[CAN CTRL] Speed limit: 500 for 3s (restore %d)\n",
+                               (int)gSpeedLimitRestoreSpeed);
+                }
             }
             break;
         }
@@ -221,6 +292,20 @@ void CAN_ControlPoll
         }
 
         gRxFlag = CAN_FLAG_FALSE;
+    }
+
+    if (gSpeedLimitActive != 0U) {
+        uint32 now;
+        SAL_GetTickCount(&now);
+        if ((int32)(now - gSpeedLimitRestoreTick) >= 0) {
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+            MotorControl_SetSpeed(gSpeedLimitRestoreSpeed);
+#endif
+            gLastSpeed = gSpeedLimitRestoreSpeed;
+            gSpeedLimitActive = 0U;
+            mcu_printf("[CAN CTRL] Speed limit released (restore %d)\n",
+                       (int)gSpeedLimitRestoreSpeed);
+        }
     }
 }
 
