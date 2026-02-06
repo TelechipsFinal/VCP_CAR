@@ -53,6 +53,7 @@
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     #include <can_demo.h>
+    #include <can_control.h>
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_IDLE == 1 )
@@ -362,6 +363,79 @@ static volatile SuspDbg_t g_SuspDbg;
 static float gyro_bias_x = 0.0f;
 static float gyro_bias_y = 0.0f;
 static float gyro_bias_z = 0.0f;
+
+/*
+***************************************************************************************************
+*                                         DRIVING MODE (STRUCTURE ONLY)
+***************************************************************************************************
+*/
+static volatile DriveMode_t g_DriveMode = DRIVE_MODE_NORMAL;
+static volatile uint8 g_DriveModeAutoEnabled = 0U;
+static const float g_DriveModeHeightOffsetDeg[3] = {
+    10.0f,   /* COMFORT */
+    0.0f,    /* NORMAL */
+    -10.0f   /* SPORT */
+};
+static const float g_DriveModeRawTargetScale[3] = {
+    1.2f,   /* COMFORT */
+    1.0f,   /* NORMAL */
+    0.8f    /* SPORT */
+};
+static const float g_DriveModeRateScale[3] = {
+    1.2f,   /* COMFORT */
+    1.0f,   /* NORMAL */
+    0.8f    /* SPORT */
+};
+
+void DriveMode_Set(DriveMode_t mode)
+{
+    if (mode > DRIVE_MODE_SPORT) {
+        mode = DRIVE_MODE_NORMAL;
+    }
+    g_DriveMode = mode;
+    g_HeightData.height_offset = g_DriveModeHeightOffsetDeg[(uint8)g_DriveMode];
+}
+
+DriveMode_t DriveMode_Get(void)
+{
+    return g_DriveMode;
+}
+
+const char *DriveMode_ToString(DriveMode_t mode)
+{
+    switch (mode) {
+        case DRIVE_MODE_COMFORT: return "COMFORT";
+        case DRIVE_MODE_NORMAL:  return "NORMAL";
+        case DRIVE_MODE_SPORT:   return "SPORT";
+        default:                 return "NORMAL";
+    }
+}
+
+void DriveMode_SetAutoEnabled(uint8 enable)
+{
+    g_DriveModeAutoEnabled = (enable != 0U) ? 1U : 0U;
+}
+
+uint8 DriveMode_IsAutoEnabled(void)
+{
+    return g_DriveModeAutoEnabled;
+}
+
+void DriveMode_UpdateAutoBySpeed(uint32 speed)
+{
+    uint32 s = speed;
+    if (s > 1000U) s = 1000U;
+
+    if (s == 0U) {
+        DriveMode_Set(DRIVE_MODE_NORMAL);
+    } else if (s <= 699U) {
+        DriveMode_Set(DRIVE_MODE_COMFORT);
+    } else if (s <= 899U) {
+        DriveMode_Set(DRIVE_MODE_NORMAL);
+    } else {
+        DriveMode_Set(DRIVE_MODE_SPORT);
+    }
+}
 
 
 typedef enum {
@@ -861,6 +935,13 @@ void Main_StartTask(void * pArg)
     
     // Main task finished
     while(1) {
+        #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
+          CAN_ControlPoll();
+        //   CAN_ControlSendSpeed();
+        #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
+        mcu_printf("[DRIVE] mode=%s auto=%d\n",
+                   DriveMode_ToString(DriveMode_Get()),
+                   (int)DriveMode_IsAutoEnabled());
         SAL_TaskSleep(1000);
     }
     
@@ -1697,6 +1778,7 @@ void IMU_Suspension_Task(void *pArg)
             float rate_max = SERVO_RATE_FLAT_FAST;
             rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
         }
+        rate_deg_s *= g_DriveModeRateScale[(uint8)DriveMode_Get()];
 
         float dt_s = (float)IMU_SUSP_PERIOD_MS / 1000.0f;
         float max_step = rate_deg_s * dt_s;   // ✅ 여기서 먼저 계산!
@@ -2248,6 +2330,7 @@ static void AppTaskCreate(void)
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     CAN_DemoCreateApp();
+    CAN_ControlInit(0U);  // Channel 0 모니터링
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_FW_UPDATE == 1 )

@@ -23,4 +23,4 @@ INCLUDES += -I$(MCU_BSP_DEV_DRIVERS_UART_PATH)/$(MCU_BSP_CHIPSET_FAMILY_NAME)
 
 # Sources
 SRCS += uart.c
-SRCS += uart_example.c
+#SRCS += uart_example.c

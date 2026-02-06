@@ -66,15 +66,15 @@ static CANMessage_t sTxMessageInfo[CAN_MAX_TEST_MSG_NUM] =
 {
 #if 1 /* Misra2012:9.3 - Partially Uninitialized Array */
    /* BufferType,                 Index, ESI, ExtendedID, RTR, ID,    FD, BRS, MM,   EventFIFO, DLC, DATA */
-    { CAN_TX_BUFFER_TYPE_DBUFFER, 0,     0,   0,          0,   0x11,  1,  1,   0xFF, 1,         1,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_DBUFFER, 1,     0,   1,          0,   0x22,  1,  1,   0xFF, 1,         2,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_DBUFFER, 2,     0,   0,          0,   0x33,  1,  1,   0xFF, 1,         3,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_DBUFFER, 3,     0,   1,          0,   0x44,  1,  1,   0xFF, 1,         4,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x55,  1,  1,   0xFF, 1,         5,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   1,          0,   0x66,  1,  1,   0xFF, 1,         6,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x77,  1,  1,   0xFF, 1,         7,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   1,          0,   0x88,  1,  1,   0xFF, 1,         8,   {0, /* Data is definded as much as DLC in sending function */} },
-    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x99,  1,  1,   0xFF, 1,         12,  {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_DBUFFER, 0,     0,   0,          0,   0x11,  0,  1,   0xFF, 1,         1,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_DBUFFER, 1,     0,   1,          0,   0x22,  0,  1,   0xFF, 1,         2,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_DBUFFER, 2,     0,   0,          0,   0x33,  0,  1,   0xFF, 1,         3,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_DBUFFER, 3,     0,   1,          0,   0x44,  0,  1,   0xFF, 1,         4,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x55,  0,  1,   0xFF, 1,         5,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   1,          0,   0x66,  0,  1,   0xFF, 1,         6,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x77,  0,  1,   0xFF, 1,         7,   {0, /* Data is definded as much as DLC in sending function */} },
+    // { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   1,          0,   0x88,  0,  1,   0xFF, 1,         8,   {0, /* Data is definded as much as DLC in sending function */} },
+    { CAN_TX_BUFFER_TYPE_FIFO,    0,     0,   0,          0,   0x88,  0,  1,   0xFF, 1,         8,  {0, /* Data is definded as much as DLC in sending function */} },
 
 #else
    /* BufferType,                 Index, ESI, ExtendedID, RTR, ID,    FD, BRS, MM,   EventFIFO, DLC, DATA */
