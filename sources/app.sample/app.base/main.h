@@ -43,6 +43,16 @@ typedef enum {
     DRIVE_MODE_SPORT   = 2
 } DriveMode_t;
 
+typedef struct {
+    uint32 speed;        // latest speed command
+    uint8  steering;     // 0=LEFT,1=RIGHT, etc
+    uint8  drivemode;    // 0=AUTO,1=COMFORT,2=NORMAL,3=SPORT
+    uint8  speed_valid;
+    uint8  steering_valid;
+    uint8  drivemode_valid;
+    uint32 last_rx_tick;
+} DriveCmd_t;
+
 /* Driving mode control (구조만 제공) */
 extern void DriveMode_Set(DriveMode_t mode);
 extern DriveMode_t DriveMode_Get(void);
@@ -50,6 +60,8 @@ extern const char *DriveMode_ToString(DriveMode_t mode);
 extern void DriveMode_SetAutoEnabled(uint8 enable);
 extern uint8 DriveMode_IsAutoEnabled(void);
 extern void DriveMode_UpdateAutoBySpeed(uint32 speed);
+
+extern DriveCmd_t gDriveCmd;
 
 
 /*

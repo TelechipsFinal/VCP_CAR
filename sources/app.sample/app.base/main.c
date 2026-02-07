@@ -36,6 +36,9 @@
 #include <ADXL345.h>
 #include <i2c.h>
 
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+    #include <motor_control.h>
+#endif
 
 #if (APLT_LINUX_SUPPORT_SPI_DEMO == 1)
     #include <spi_eccp.h>
@@ -74,22 +77,26 @@
 *                                         TASK CONFIGURATION
 ***************************************************************************************************
 */
+#define CAN_RX_TASK_PRIO        (SAL_PRIO_APP_CFG)
+#define SPEED_TASK_PRIO         (SAL_PRIO_APP_CFG + 1)
+#define STEER_TASK_PRIO         (SAL_PRIO_APP_CFG + 2)
+#define DRIVEMODE_TASK_PRIO     (SAL_PRIO_APP_CFG + 3)
 
-#define CAN_RX_TASK_PRIO        (SAL_PRIO_APP_CFG + 1)      
-#define MOTOR_TASK_PRIO         (SAL_PRIO_APP_CFG + 2)
-#define ADXL_MONITOR_TASK_PRIO  (SAL_PRIO_APP_CFG + 3)      // ✅ 추가
-#define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 4)      
-#define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 5)      
-#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 6)     
+#define ADXL_MONITOR_TASK_PRIO  (SAL_PRIO_APP_CFG + 5)      // ✅ 추가
+#define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 6)      
+#define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 7)      
+#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 8)     
 
 
-// Task Stack Sizes - 극한 최소화
+// Task Stack Sizes - 안정 동작 기준 (단위: uint32 words)
 #define CAN_RX_TASK_STK_SIZE    (256)   // 1KB
-#define MOTOR_TASK_STK_SIZE     (128)   // 1KB
-#define IMU_SUSP_TASK_STK_SIZE  (768)   // 2KB (가장 중요) 512로 돌리기@@@@@@@@@@@@@@@
-#define HEIGHT_TASK_STK_SIZE    (128)   // 1KB
-#define MONITOR_TASK_STK_SIZE   (256)   // 1KB    
-#define ADXL_TEST_TASK_STK_SIZE (256)   // 1KB  ✅ 추가
+#define SPEED_TASK_STK_SIZE     (128)   // 512B
+#define STEER_TASK_STK_SIZE     (128)   // 512B
+#define DRIVEMODE_TASK_STK_SIZE (128)   // 512B
+#define IMU_SUSP_TASK_STK_SIZE  (512)   // 2KB (IMU/서보 연산)
+#define HEIGHT_TASK_STK_SIZE    (128)   // 512B
+#define MONITOR_TASK_STK_SIZE   (256)   // 1KB
+#define ADXL_TEST_TASK_STK_SIZE (256)   // 1KB
  
 
 // Control Frequencies
@@ -97,6 +104,9 @@
 #define IMU_SUSP_PERIOD_MS      (10)    // 100Hz
 #define HEIGHT_PERIOD_MS        (50)    // 20Hz
 #define MONITOR_PERIOD_MS       (100)   // 10Hz
+
+/* Steering timing */
+#define DRIVE_STEER_DURATION_MS (500U)
 
 /*
 ***************************************************************************************************
@@ -225,7 +235,9 @@ static uint32                           gALiveCount;
 
 // Task IDs
 static uint32 gCANRxTaskID = 0;
-static uint32 gMotorTaskID = 0;
+static uint32 gSpeedTaskID = 0;
+static uint32 gSteerTaskID = 0;
+static uint32 gDriveModeTaskID = 0;
 static uint32 gIMUSuspTaskID = 0;
 static uint32 gHeightTaskID = 0;
 static uint32 gMonitorTaskID = 0;
@@ -233,7 +245,9 @@ static uint32 gADXL345TestTaskID = 0;
 
 // Task Stacks
 static uint32 gCANRxTaskStk[CAN_RX_TASK_STK_SIZE];
-static uint32 gMotorTaskStk[MOTOR_TASK_STK_SIZE];
+static uint32 gSpeedTaskStk[SPEED_TASK_STK_SIZE];
+static uint32 gSteerTaskStk[STEER_TASK_STK_SIZE];
+static uint32 gDriveModeTaskStk[DRIVEMODE_TASK_STK_SIZE];
 static uint32 gIMUSuspTaskStk[IMU_SUSP_TASK_STK_SIZE];
 static uint32 gHeightTaskStk[HEIGHT_TASK_STK_SIZE];
 static uint32 gMonitorTaskStk[MONITOR_TASK_STK_SIZE];
@@ -280,6 +294,9 @@ static CAN_Data_t g_CANData;
 static Motor_Data_t g_MotorData;
 static Servo_Data_t g_ServoData;
 static Height_Data_t g_HeightData;
+
+DriveCmd_t gDriveCmd;
+static uint32 gDriveLastSpeed = 0U;
 
 // Kalman Filters
 static Kalman_t kalman_roll;
@@ -463,7 +480,9 @@ static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick
 
 static void Main_StartTask(void *pArg);
 static void CAN_RX_Task(void *pArg);
-static void Motor_Control_Task(void *pArg);
+static void Speed_Control_Task(void *pArg);
+static void Steering_Control_Task(void *pArg);
+static void DriveMode_Control_Task(void *pArg);
 static void IMU_Suspension_Task(void *pArg);
 static void Height_Control_Task(void *pArg);
 static void Monitoring_Task(void *pArg);
@@ -524,31 +543,31 @@ static void PID_Damping_Reset(PID_Damping_t *pid) {
     pid->prev_error = 0;
 }
 
-static void Motor_SetSpeed(float speed) {
-    PDMModeConfig_t pwm_cfg;
-    uint32 duty_ns;
+// static void Motor_SetSpeed(float speed) {
+//     PDMModeConfig_t pwm_cfg;
+//     uint32 duty_ns;
     
-    // Speed to duty cycle (0-100% → 0-100% duty)
-    duty_ns = (uint32)(speed * 200000.0f);  // 20kHz PWM (50us period)
+//     // Speed to duty cycle (0-100% → 0-100% duty)
+//     duty_ns = (uint32)(speed * 200000.0f);  // 20kHz PWM (50us period)
     
-    if(duty_ns > 20000000) duty_ns = 20000000;
+//     if(duty_ns > 20000000) duty_ns = 20000000;
     
-    pwm_cfg.mcPortNumber = GPIO_PERICH_CH2;  // Motor channel (GPIO-C)
-    pwm_cfg.mcOperationMode = PDM_OUTPUT_MODE_PHASE_1;
-    pwm_cfg.mcInversedSignal = 0;
-    pwm_cfg.mcOutSignalInIdle = 0;
-    pwm_cfg.mcLoopCount = 0;
-    pwm_cfg.mcOutputCtrl = 0x05;  // DO_Sel=1, OEN_Sel=1
-    pwm_cfg.mcPeriodNanoSec1 = 50000;     // 50us (20kHz)
-    pwm_cfg.mcDutyNanoSec1 = duty_ns;
-    pwm_cfg.mcDutyNanoSec2 = 0;
-    pwm_cfg.mcPeriodNanoSec2 = 0;
+//     pwm_cfg.mcPortNumber = GPIO_PERICH_CH2;  // Motor channel (GPIO-C)
+//     pwm_cfg.mcOperationMode = PDM_OUTPUT_MODE_PHASE_1;
+//     pwm_cfg.mcInversedSignal = 0;
+//     pwm_cfg.mcOutSignalInIdle = 0;
+//     pwm_cfg.mcLoopCount = 0;
+//     pwm_cfg.mcOutputCtrl = 0x05;  // DO_Sel=1, OEN_Sel=1
+//     pwm_cfg.mcPeriodNanoSec1 = 50000;     // 50us (20kHz)
+//     pwm_cfg.mcDutyNanoSec1 = duty_ns;
+//     pwm_cfg.mcDutyNanoSec2 = 0;
+//     pwm_cfg.mcPeriodNanoSec2 = 0;
     
-    PDM_Disable(4, PMM_OFF);
-    SAL_TaskSleep(1);
-    PDM_SetConfig(4, &pwm_cfg);
-    PDM_Enable(4, PMM_OFF);
-}
+//     PDM_Disable(4, PMM_OFF);
+//     SAL_TaskSleep(1);
+//     PDM_SetConfig(4, &pwm_cfg);
+//     PDM_Enable(4, PMM_OFF);
+// }
 
 /* ===== 유틸리티 함수 ===== */
 static inline float clamp(float v, float lo, float hi) {
@@ -780,6 +799,7 @@ void cmain (void)
     memset(&g_ServoData, 0, sizeof(g_ServoData));
     memset(&g_HeightData, 0, sizeof(g_HeightData));
     memset(&g_ADXLData, 0, sizeof(g_ADXLData));
+    memset(&gDriveCmd, 0, sizeof(gDriveCmd));
 
     g_CANData.suspension_enable = 1;
     g_CANData.leveling_enable = 1;
@@ -845,35 +865,61 @@ void Main_StartTask(void * pArg)
     if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
         mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
     }
-    // Create application tasks
-        AppTaskCreate();
-        
         mcu_printf("[SYSTEM] Creating Control Tasks...\n\n");
+
+    #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
+    CAN_ControlInit(0U);
+
+    // Task 1: CAN RX (polling read)
+    err = SAL_TaskCreate(&gCANRxTaskID,
+                        (const uint8 *)"CAN_RX",
+                        (SALTaskFunc)&CAN_RX_Task,
+                        &gCANRxTaskStk[0],
+                        CAN_RX_TASK_STK_SIZE,
+                        CAN_RX_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] CAN RX Task Created (Priority: %d)\n", CAN_RX_TASK_PRIO);
+    }
+
+    // Task 2: Speed Control
+    err = SAL_TaskCreate(&gSpeedTaskID,
+                        (const uint8 *)"Speed_Ctrl",
+                        (SALTaskFunc)&Speed_Control_Task,
+                        &gSpeedTaskStk[0],
+                        SPEED_TASK_STK_SIZE,
+                        SPEED_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] Speed Task Created (Priority: %d)\n", SPEED_TASK_PRIO);
+    }
+
+    // Task 3: Steering Control
+    err = SAL_TaskCreate(&gSteerTaskID,
+                        (const uint8 *)"Steer_Ctrl",
+                        (SALTaskFunc)&Steering_Control_Task,
+                        &gSteerTaskStk[0],
+                        STEER_TASK_STK_SIZE,
+                        STEER_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] Steering Task Created (Priority: %d)\n", STEER_TASK_PRIO);
+    }
+
+    // Task 4: DriveMode Control
+    err = SAL_TaskCreate(&gDriveModeTaskID,
+                        (const uint8 *)"DriveMode_Ctrl",
+                        (SALTaskFunc)&DriveMode_Control_Task,
+                        &gDriveModeTaskStk[0],
+                        DRIVEMODE_TASK_STK_SIZE,
+                        DRIVEMODE_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] DriveMode Task Created (Priority: %d)\n", DRIVEMODE_TASK_PRIO);
+    }
+    #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     
     
-    // // Task 1: CAN RX (Event-driven) 
-    // err = SAL_TaskCreate(&gCANRxTaskID,
-    //                     (const uint8 *)"CAN_RX",
-    //                     (SALTaskFunc)&CAN_RX_Task,
-    //                     &gCANRxTaskStk[0],
-    //                     CAN_RX_TASK_STK_SIZE,
-    //                     CAN_RX_TASK_PRIO,
-    //                     NULL);
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] CAN RX Task Created (Priority: %d, Event)\n", CAN_RX_TASK_PRIO);
-    // }
-    
-    // // Task 2: Motor Control (100Hz)                                                                                         
-    // err = SAL_TaskCreate(&gMotorTaskID,
-    //                     (const uint8 *)"Motor_Control",
-    //                     (SALTaskFunc)&Motor_Control_Task,
-    //                     &gMotorTaskStk[0],
-    //                     MOTOR_TASK_STK_SIZE,
-    //                     MOTOR_TASK_PRIO,
-    //                     NULL);
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] Motor Task Created (Priority: %d, 100Hz)\n", MOTOR_TASK_PRIO);
-    // }
 
          //Task 6:ADXL345_Monitor
     err = SAL_TaskCreate(&gADXL345TestTaskID,
@@ -904,18 +950,6 @@ void Main_StartTask(void * pArg)
         mcu_printf("[SYSTEM] IMU+Susp Task Created (Priority: %d, 100Hz)\n", IMU_SUSP_TASK_PRIO);
     }
     
-    // // Task 4: Height Control (20Hz)
-    // err = SAL_TaskCreate(&gHeightTaskID,
-    //                     (const uint8 *)"Height_Control",
-    //                     (SALTaskFunc)&Height_Control_Task,
-    //                     &gHeightTaskStk[0],
-    //                     HEIGHT_TASK_STK_SIZE,
-    //                     HEIGHT_TASK_PRIO,
-    //                     NULL);
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] Height Task Created (Priority: %d, 20Hz)\n", HEIGHT_TASK_PRIO);
-    // }
-    
     // Task 5: Monitoring (10Hz)
     err = SAL_TaskCreate(&gMonitorTaskID,
                         (const uint8 *)"Monitoring",
@@ -932,13 +966,9 @@ void Main_StartTask(void * pArg)
 
     mcu_printf("[SYSTEM] System Initialization Sequence Finished!\n"); 
     mcu_printf("=========================================\n\n");
-    
+
     // Main task finished
     while(1) {
-        #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
-          CAN_ControlPoll();
-        //   CAN_ControlSendSpeed();
-        #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
         mcu_printf("[DRIVE] mode=%s auto=%d\n",
                    DriveMode_ToString(DriveMode_Get()),
                    (int)DriveMode_IsAutoEnabled());
@@ -947,96 +977,158 @@ void Main_StartTask(void * pArg)
     
 }
 
-
 /*
 ***************************************************************************************************
 *                                          CAN_RX_Task
 ***************************************************************************************************
 */
-
-void CAN_RX_Task(void *pArg) {
+static void CAN_RX_Task(void *pArg)
+{
     (void)pArg;
-    
-    mcu_printf("[CAN_RX] Task Started (Event-driven)\n");
-    
+
+    mcu_printf("[CAN_RX] Task Started\n");
+
     while(1) {
-        // TODO: CAN RX 인터럽트 대기
-        // 현재는 폴링 방식으로 시뮬레이션
-        SAL_TaskSleep(20);
-        
-        // Simulate CAN data
-        SAL_CoreCriticalEnter();
-        g_CANData.motor_speed_cmd = 50.0f;
-        g_CANData.suspension_enable = 1;
-        g_CANData.leveling_enable = 1;
-        SAL_GetTickCount(&g_CANData.last_rx_time);
-        SAL_CoreCriticalExit();
+        CAN_ControlPoll();
+        SAL_TaskSleep(1);
     }
 }
 
 /*
 ***************************************************************************************************
-*                                          Motor_Control_Task
+*                                          Speed_Control_Task
 ***************************************************************************************************
 */
-
-void Motor_Control_Task(void *pArg) {
+static void Speed_Control_Task(void *pArg)
+{
     (void)pArg;
-    
-    uint32 start_tick, current_tick;
-    float current_speed = 0;
-    
-    mcu_printf("[MOTOR] Task Started (100Hz)\n");
-    
-    SAL_TaskSleep(100);
-    
+
+    mcu_printf("[SPEED] Task Started\n");
+
     while(1) {
-        SAL_GetTickCount(&start_tick);
-        
-        // Read CAN data (Safety 제거)
+        uint32 speed;
+        uint8 valid;
+
         SAL_CoreCriticalEnter();
-        float target_speed = g_CANData.motor_speed_cmd;
+        speed = gDriveCmd.speed;
+        valid = gDriveCmd.speed_valid;
+        gDriveCmd.speed_valid = 0U;
         SAL_CoreCriticalExit();
-        
-        // 최대 속도는 항상 100%
-        float max_speed = 100.0f;
-        
-        // Limit speed
-        if(target_speed > max_speed) {
-            target_speed = max_speed;
+
+        if (valid != 0U) {
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+            MotorControl_SetSpeed(speed);
+#endif
+            SAL_CoreCriticalEnter();
+            gDriveLastSpeed = speed;
+            SAL_CoreCriticalExit();
+            mcu_printf("[SPEED] Speed: %d\n", (int)speed);
+
+            if (DriveMode_IsAutoEnabled() != 0U) {
+                DriveMode_UpdateAutoBySpeed(speed);
+            }
         }
-        
-        // Ramping (항상 빠른 응답)
-        float ramp_rate = 0.1f;  // Safety에 따른 조건 제거
-        if(target_speed > current_speed) {
-            current_speed += ramp_rate;
-            if(current_speed > target_speed) current_speed = target_speed;
-        } else {
-            current_speed -= ramp_rate;
-            if(current_speed < target_speed) current_speed = target_speed;
-        }
-        
-        // Output
-        Motor_SetSpeed(current_speed);
-        
-        SAL_CoreCriticalEnter();
-        g_MotorData.current_speed = current_speed;
-        SAL_CoreCriticalExit();
-        
-        // Sleep
-        SAL_GetTickCount(&current_tick);
-        uint32 elapsed = current_tick - start_tick;
-        if(elapsed < MOTOR_PERIOD_MS) {
-            SAL_TaskSleep(MOTOR_PERIOD_MS - elapsed);
-        }
+
+        SAL_TaskSleep(10);
     }
 }
 
 /*
 ***************************************************************************************************
-*                                          IMU_Suspension_Task
+*                                          Steering_Control_Task
 ***************************************************************************************************
 */
+static void Steering_Control_Task(void *pArg)
+{
+    (void)pArg;
+
+    mcu_printf("[STEER] Task Started\n");
+
+    while(1) {
+        uint8 steer;
+        uint8 valid;
+        uint32 base_speed;
+
+        SAL_CoreCriticalEnter();
+        steer = gDriveCmd.steering;
+        valid = gDriveCmd.steering_valid;
+        gDriveCmd.steering_valid = 0U;
+        base_speed = gDriveLastSpeed;
+        SAL_CoreCriticalExit();
+
+        if (valid != 0U) {
+            if (steer == CAN_CTRL_DATA_LEFT) {
+                mcu_printf("[STEER] LEFT\n");
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+                MotorControl_SetDualSpeed(base_speed / 2U, base_speed);
+                SAL_TaskSleep(DRIVE_STEER_DURATION_MS);
+                MotorControl_SetDualSpeed(base_speed, base_speed);
+#endif
+            } else if (steer == CAN_CTRL_DATA_RIGHT) {
+                mcu_printf("[STEER] RIGHT\n");
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+                MotorControl_SetDualSpeed(base_speed, base_speed / 2U);
+                SAL_TaskSleep(DRIVE_STEER_DURATION_MS);
+                MotorControl_SetDualSpeed(base_speed, base_speed);
+#endif
+            } else {
+                mcu_printf("[STEER] Unknown: 0x%X\n", steer);
+            }
+        }
+
+        SAL_TaskSleep(10);
+    }
+}
+
+/*
+***************************************************************************************************
+*                                          DriveMode_Control_Task
+***************************************************************************************************
+*/
+static void DriveMode_Control_Task(void *pArg)
+{
+    (void)pArg;
+
+    mcu_printf("[DRIVEMODE] Task Started\n");
+
+    while(1) {
+        uint8 mode;
+        uint8 valid;
+        uint32 speed_snapshot;
+
+        SAL_CoreCriticalEnter();
+        mode = gDriveCmd.drivemode;
+        valid = gDriveCmd.drivemode_valid;
+        gDriveCmd.drivemode_valid = 0U;
+        speed_snapshot = gDriveLastSpeed;
+        SAL_CoreCriticalExit();
+
+        if (valid != 0U) {
+            if (mode == 0U) {
+                DriveMode_SetAutoEnabled(1U);
+                DriveMode_UpdateAutoBySpeed(speed_snapshot);
+                mcu_printf("[DRIVEMODE] AUTO (speed=%d)\n", (int)speed_snapshot);
+            } else if (mode == 1U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_COMFORT);
+                mcu_printf("[DRIVEMODE] COMFORT\n");
+            } else if (mode == 2U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_NORMAL);
+                mcu_printf("[DRIVEMODE] NORMAL\n");
+            } else if (mode == 3U) {
+                DriveMode_SetAutoEnabled(0U);
+                DriveMode_Set(DRIVE_MODE_SPORT);
+                mcu_printf("[DRIVEMODE] SPORT\n");
+            } else {
+                mcu_printf("[DRIVEMODE] Unknown: 0x%X\n", mode);
+            }
+        }
+
+        SAL_TaskSleep(10);
+    }
+}
+
 
 /*
 ***************************************************************************************************
