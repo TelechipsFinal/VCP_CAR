@@ -58,6 +58,7 @@
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     #include <can_demo.h>
+    #include <can_control.h>
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_IDLE == 1 )
@@ -93,7 +94,7 @@
 
 
 // Task Stack Sizes - 안정 동작 기준 (단위: uint32 words)
-#define CAN_RX_TASK_STK_SIZE    (256)   // 1KB
+#define CAN_RX_TASK_STK_SIZE    (128)   // 1KB
 #define SPEED_TASK_STK_SIZE     (128)   // 512B
 #define STEER_TASK_STK_SIZE     (128)   // 512B
 #define DRIVEMODE_TASK_STK_SIZE (128)   // 512B
@@ -405,24 +406,81 @@ static const char *g_wheel_name[WHEEL_MAX] = { "FL", "FR", "RL", "RR" };
  */
 static const uint8 g_ADXL_DEV_TO_WHEEL[ADXL_COUNT] = { WHEEL_RL, WHEEL_FL, WHEEL_RR, WHEEL_FR };
 
-
-typedef enum {
-    WHEEL_FL = 0,
-    WHEEL_FR = 1,
-    WHEEL_RL = 2,
-    WHEEL_RR = 3,
-    WHEEL_MAX = 4
-} WheelIdx_t;
-
-static const char *g_wheel_name[WHEEL_MAX] = { "FL", "FR", "RL", "RR" };
-
-/* dev(=mux채널/센서번호) -> wheel index 매핑
- * 네 테스트 기준(예시): dev0=RL, dev1=FL, dev2=RR, dev3=FR
- * (너가 실제로 쓰는 매핑이 이거 맞으면 그대로)
- */
-static const uint8 g_ADXL_DEV_TO_WHEEL[ADXL_COUNT] = { WHEEL_RL, WHEEL_FL, WHEEL_RR, WHEEL_FR };
-
 static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick(ms)
+/*
+***************************************************************************************************
+*                                         DRIVING MODE (STRUCTURE ONLY)
+***************************************************************************************************
+*/
+static volatile DriveMode_t g_DriveMode = DRIVE_MODE_NORMAL;
+static volatile uint8 g_DriveModeAutoEnabled = 0U;
+static const float g_DriveModeHeightOffsetDeg[3] = {
+    10.0f,   /* COMFORT */
+    0.0f,    /* NORMAL */
+    -10.0f   /* SPORT */
+};
+static const float g_DriveModeRawTargetScale[3] = {
+    1.2f,   /* COMFORT */
+    1.0f,   /* NORMAL */
+    0.8f    /* SPORT */
+};
+static const float g_DriveModeRateScale[3] = {
+    1.2f,   /* COMFORT */
+    1.0f,   /* NORMAL */
+    0.8f    /* SPORT */
+};
+
+void DriveMode_Set(DriveMode_t mode)
+{
+    if (mode > DRIVE_MODE_SPORT) {
+        mode = DRIVE_MODE_NORMAL;
+    }
+    g_DriveMode = mode;
+    g_HeightData.height_offset = g_DriveModeHeightOffsetDeg[(uint8)g_DriveMode];
+}
+
+DriveMode_t DriveMode_Get(void)
+{
+    return g_DriveMode;
+}
+
+const char *DriveMode_ToString(DriveMode_t mode)
+{
+    switch (mode) {
+        case DRIVE_MODE_COMFORT: return "COMFORT";
+        case DRIVE_MODE_NORMAL:  return "NORMAL";
+        case DRIVE_MODE_SPORT:   return "SPORT";
+        default:                 return "NORMAL";
+    }
+}
+
+void DriveMode_SetAutoEnabled(uint8 enable)
+{
+    g_DriveModeAutoEnabled = (enable != 0U) ? 1U : 0U;
+}
+
+uint8 DriveMode_IsAutoEnabled(void)
+{
+    return g_DriveModeAutoEnabled;
+}
+
+void DriveMode_UpdateAutoBySpeed(uint32 speed)
+{
+    uint32 s = speed;
+    if (s > 1000U) s = 1000U;
+
+    if (s == 0U) {
+        DriveMode_Set(DRIVE_MODE_NORMAL);
+    } else if (s <= 699U) {
+        DriveMode_Set(DRIVE_MODE_COMFORT);
+    } else if (s <= 899U) {
+        DriveMode_Set(DRIVE_MODE_NORMAL);
+    } else {
+        DriveMode_Set(DRIVE_MODE_SPORT);
+    }
+}
+
+
 /*
 ***************************************************************************************************
 *                                         FUNCTION PROTOTYPES
@@ -454,9 +512,9 @@ static void DisplayOTPInfo(void);
 ***************************************************************************************************
 */
 
-static void Motor_SetSpeed(float speed) {
-    PDMModeConfig_t pwm_cfg;
-    uint32 duty_ns;
+// static void Motor_SetSpeed(float speed) {
+//     PDMModeConfig_t pwm_cfg;
+//     uint32 duty_ns;
     
 //     // Speed to duty cycle (0-100% → 0-100% duty)
 //     duty_ns = (uint32)(speed * 200000.0f);  // 20kHz PWM (50us period)
@@ -893,19 +951,19 @@ void Main_StartTask(void * pArg)
     // }
 
     // Task X: ISO2631 (100Hz)
-err = SAL_TaskCreate(&gISOTaskID,
-                    (const uint8 *)"ISO2631",
-                    (SALTaskFunc)&ISO2631_Task,
-                    &gISOTaskStk[0],
-                    ISO_TASK_STK_SIZE,
-                    ISO_TASK_PRIO,
-                    NULL);
+    err = SAL_TaskCreate(&gISOTaskID,
+                        (const uint8 *)"ISO2631",
+                        (SALTaskFunc)&ISO2631_Task,
+                        &gISOTaskStk[0],
+                        ISO_TASK_STK_SIZE,
+                        ISO_TASK_PRIO,
+                        NULL);
 
-if(err == SAL_RET_SUCCESS) {
-    mcu_printf("[SYSTEM] ISO2631 Task Created (Priority: %d, 100Hz)\n", ISO_TASK_PRIO);
-} else {
-    mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
-}
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] ISO2631 Task Created (Priority: %d, 100Hz)\n", ISO_TASK_PRIO);
+    } else {
+        mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
+    }
 
 
 
@@ -936,7 +994,7 @@ static void CAN_RX_Task(void *pArg)
 
     while(1) {
         CAN_ControlPoll();
-        SAL_TaskSleep(1);
+        SAL_TaskSleep(100);
     }
 }
 
@@ -1413,7 +1471,6 @@ void IMU_Suspension_Task(void *pArg)
         SAL_CoreCriticalEnter();
         for (uint8 i = 0; i < 4; i++) {
             wheel_accel_z[i] = g_ADXLData.accel_z[i];
-            wheel_impact[i]  = g_ADXLData.impact_detected[i];   // ✅ 추가
         }
         SAL_CoreCriticalExit();
 
@@ -1537,35 +1594,6 @@ float response = -mag * DAMP_GAIN;
 }
 
 
-        /* (2) 동시 충격이면: “축” 동시를 특별취급
-        - 앞2개 동시: 뒤쪽 잠깐 inhibit
-        - 뒤2개 동시: 앞쪽 잠깐 inhibit
-        - 대각선/3~4개: inhibit 안 거는게 보통 안정적 */
-        if (multi) {
-            uint8 front_hit = (impact_filt[WHEEL_FL] >= IMP_COIN_THR) &&
-                            (impact_filt[WHEEL_FR] >= IMP_COIN_THR);
-
-            uint8 rear_hit  = (impact_filt[WHEEL_RL] >= IMP_COIN_THR) &&
-                            (impact_filt[WHEEL_RR] >= IMP_COIN_THR);
-
-            if (front_hit && !rear_hit) {
-                uint32 until = now_ms + INHIBIT_MS_AXLE;
-                if (until > inhibit_until_ms[WHEEL_RL]) inhibit_until_ms[WHEEL_RL] = until;
-                if (until > inhibit_until_ms[WHEEL_RR]) inhibit_until_ms[WHEEL_RR] = until;
-            } else if (rear_hit && !front_hit) {
-                uint32 until = now_ms + INHIBIT_MS_AXLE;
-                if (until > inhibit_until_ms[WHEEL_FL]) inhibit_until_ms[WHEEL_FL] = until;
-                if (until > inhibit_until_ms[WHEEL_FR]) inhibit_until_ms[WHEEL_FR] = until;
-            }
-        }
-
-        for (uint8 i = 0; i < 4; i++) {
-            if (now_ms < inhibit_until_ms[i]) {
-                adxl_pre_kick[i] = 0.0f;    // 프리킥은 끊는 게 효과 좋음
-                // impact_filt[i] *= 0.7f;  // (선택) 잔향 줄여서 재트리거 방지
-            }
-        }
-
         // ========== 7. 레벨링 PID ==========
         float leveling[4] = {0, 0, 0, 0};
 
@@ -1643,14 +1671,6 @@ float response = -mag * DAMP_GAIN;
             float roll_ctrl_deg  = height_to_servo_deg(roll_ctrl_mm,  MAX_CORRECTION_DEG);
             float pitch_ctrl_deg = height_to_servo_deg(pitch_ctrl_mm, MAX_CORRECTION_DEG);
 
-            /* =========================================================
-            * ✅ 방지턱/충격 구간: roll만 약화해서 좌우 춤 억제
-            * (pitch는 유지해야 방지턱에서 자연스럽게 복귀함)
-            * ========================================================= */
-            if (!slope_state && bump_mode) {
-                roll_ctrl_deg *= 0.25f;
-                pid_roll.integral *= 0.7f;
-            }
             float max_deg = MAX_CORRECTION_DEG * range_limit;
 
             /* clamp 전 값 백업 */
@@ -1709,7 +1729,6 @@ float response = -mag * DAMP_GAIN;
 
 
         // ========== 9. 통합 제어 + deg/sec 기반 속도 제한 추종 ==========
-        // ✅ height 읽기 (전체 차고 조정) - 한 번만 선언!
         SAL_CoreCriticalEnter();
         float height = g_HeightData.height_offset;
         SAL_CoreCriticalExit();
@@ -2388,6 +2407,7 @@ static void ISO2631_Task(void *pArg)
         }
     }
 }
+
 
 
 
