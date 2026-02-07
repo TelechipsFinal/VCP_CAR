@@ -26,8 +26,6 @@ INCLUDES += -I$(MCU_BSP_APP_SAMPLE_BASE_PATH)/$(MCU_BSP_CHIPSET_FAMILY_NAME)
 
 # Sources
 SRCS += main.c
-SRCS += motor_control.c
-SRCS += can_control.c
 SRCS += kalman_filter.c
 SRCS += printf_float.c
 SRCS += imu_calibration.c
