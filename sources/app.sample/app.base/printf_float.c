@@ -44,16 +44,25 @@ void Print_Float_Value(float value, uint32 scale)
     }
 
     if (scale == 1000000000) decimal_places = 9;
-    else if (scale == 1000000) decimal_places = 6;
-    else if (scale == 1000) decimal_places = 3;
-    else if (scale == 100) decimal_places = 2;
-    else if (scale == 10) decimal_places = 1;
+    else if (scale == 100000000) decimal_places = 8;
+    else if (scale == 10000000)  decimal_places = 7;
+    else if (scale == 1000000)   decimal_places = 6;
+    else if (scale == 100000)    decimal_places = 5;   // ✅ 추가
+    else if (scale == 10000)     decimal_places = 4;   // ✅ 추가
+    else if (scale == 1000)      decimal_places = 3;
+    else if (scale == 100)       decimal_places = 2;
+    else if (scale == 10)        decimal_places = 1;
     else decimal_places = 0;
+
 
     if (decimal_places == 9)
         mcu_printf("%d.%09d", integer, fraction);
     else if (decimal_places == 6)
         mcu_printf("%d.%06d", integer, fraction);
+    else if (decimal_places == 5)
+        mcu_printf("%d.%05d", integer, fraction);
+    else if (decimal_places == 4)
+        mcu_printf("%d.%04d", integer, fraction);
     else if (decimal_places == 3)
         mcu_printf("%d.%03d", integer, fraction);
     else if (decimal_places == 2)
@@ -62,4 +71,5 @@ void Print_Float_Value(float value, uint32 scale)
         mcu_printf("%d.%01d", integer, fraction);
     else
         mcu_printf("%d", integer);
+
 }
