@@ -1918,10 +1918,10 @@ void Monitoring_Task(void *pArg)
         SAL_CoreCriticalEnter();
         sys_ready = g_SYSTEM_READY;
         SAL_CoreCriticalExit();
-
+ 
         if (sys_ready != 0U) break;
         SAL_TaskSleep(50);
-    }
+    } 
 
     mcu_printf("[MONITOR] Task Started (10Hz)\n\n");
     SAL_TaskSleep(100);
@@ -2388,7 +2388,7 @@ static void ISO2631_Task(void *pArg)
 {
     (void)pArg;
 
-    // ✅ 시스템 준비 완료(캘리브/안정화 끝) 기다림
+    // ✅ 시스템 준비 완료 대기
     while (1) {
         uint8 ready;
         SAL_CoreCriticalEnter();
@@ -2402,12 +2402,12 @@ static void ISO2631_Task(void *pArg)
     mcu_printf("[ISO2631] Task Started (100Hz)\n");
     mcu_printf("[ISO2631] Logging IMU data for Excel...\n\n");
 
-    // ✅ ISO 모듈 초기화 + 1회 측정
+    // ✅ ISO 모듈 초기화
     ISO2631_Init(100.0f);            // 100Hz
     ISO2631_SetWarmup(200, 100);     // warmup 2s, gravity 1s
-    ISO2631_Start(700);              // 7s window @100Hz (측정구간)
+    ISO2631_Start(700);              // 7s window @100Hz
 
-    // ✅ CSV 헤더 출력 (엑셀에서 복사-붙여넣기용)
+    // ✅ CSV 헤더
     mcu_printf("=== CSV DATA START ===\n");
     mcu_printf("Time_ms,Roll_deg,Pitch_deg,AccelZ_ms2\n");
 
@@ -2418,20 +2418,20 @@ static void ISO2631_Task(void *pArg)
     while (1) {
         SAL_GetTickCount(&start_tick);
 
-        // ✅ IMU 데이터 스냅샷
+        // ✅ IMU 데이터 읽기
         float roll, pitch, az;
         uint32 now_ms;
         
         SAL_CoreCriticalEnter();
         roll = g_IMUData.roll;
         pitch = g_IMUData.pitch;
-        az = g_IMUData.accel_z;
+        az = g_IMUData.accel_z;  // ✅ 이미 m/s² 단위
         SAL_CoreCriticalExit();
 
         SAL_GetTickCount(&now_ms);
         uint32 elapsed_ms = now_ms - log_start_ms;
 
-        // ✅ CSV 형식으로 출력 (띄어쓰기 없이!)
+        // ✅ CSV 출력
         mcu_printf("%d,", (int)elapsed_ms);
         Print_Float_Value(roll, 100);
         mcu_printf(",");
@@ -2440,10 +2440,9 @@ static void ISO2631_Task(void *pArg)
         Print_Float_Value(az, 1000);
         mcu_printf("\n");
 
-        // ✅ ISO2631 업데이트 (az는 이미 m/s^2 단위)
+        // ✅ ISO2631 업데이트 (STM32와 동일)
         uint8 done = ISO2631_Update(az);
 
-        // ✅ 1번만 출력하고 태스크 종료
         if (done == 1U) {
             mcu_printf("=== CSV DATA END ===\n\n");
             
@@ -2459,7 +2458,7 @@ static void ISO2631_Task(void *pArg)
             }
         }
 
-        // 정확히 100Hz 유지
+        // ✅ 정확히 100Hz 유지
         uint32 end_tick;
         SAL_GetTickCount(&end_tick);
         uint32 elapsed = end_tick - start_tick;
@@ -2478,7 +2477,7 @@ static void AppTaskCreate(void)
 {
 #if (APLT_LINUX_SUPPORT_SPI_DEMO == 1)
     ECCP_InitSPIManager();
-#endif  
+#endif 
 #if (APLT_LINUX_SUPPORT_POWER_CTRL == 1)
     POWER_APP_StartDemo();
 #endif

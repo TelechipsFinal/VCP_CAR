@@ -33,8 +33,20 @@ static uint32                           g_i2c_global_sem;
 static uint8                            g_i2c_global_sem_init = 0U;
 static const uint8                      g_i2c_global_sem_name[] = "I2C_GLOBAL";
 
+#define I2C_SUPPRESS_RD_ACK_FAIL        (1U)
+
 static void I2C_DumpStatus(uint8 ucCh, const char *tag)
 {
+#if (I2C_SUPPRESS_RD_ACK_FAIL == 1U)
+    if ((tag != NULL_PTR) &&
+        (tag[0] == 'R') && (tag[1] == 'D') && (tag[2] == '_') &&
+        (tag[3] == 'A') && (tag[4] == 'C') && (tag[5] == 'K') &&
+        (tag[6] == '_') && (tag[7] == 'F') && (tag[8] == 'A') &&
+        (tag[9] == 'I') && (tag[10] == 'L') && (tag[11] == '\0'))
+    {
+        return;
+    }
+#endif
     if (i2c[ucCh].dBase < (UINT_MAX_VALUE - I2C_SR)) {
         uint32 sr = SAL_ReadReg((uint32)(i2c[ucCh].dBase + I2C_SR));
         mcu_printf("[I2C][%s] ch=%d SR=0x%08X\n", tag, ucCh, sr);

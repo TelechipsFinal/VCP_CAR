@@ -6,6 +6,7 @@ compile: ../../../sources/app.sample/app.base/printf_float.c
 compile: ../../../sources/app.sample/app.base/imu_calibration.c
 compile: ../../../sources/app.sample/app.base/servo_control.c
 compile: ../../../sources/app.sample/app.base/ADXL345_test.c
+compile: ../../../sources/app.sample/app.base/ISO2631-1.c
 compile: ../../../sources/app.sample/app.can.demo/can_demo.c
 compile: ../../../sources/app.sample/app.console/console.c
 compile: ../../../sources/app.sample/app.fw.update/fwupdate.c

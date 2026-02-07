@@ -9,7 +9,7 @@
 
 #define ISO_GRAVITY 9.81f
 
-// ISO 2631-1 Wk (너가 준 값 그대로)
+// ISO 2631-1 Wk 필터 주파수
 #define WK_F1 0.4f
 #define WK_F2 12.5f
 #define WK_F3 12.5f
@@ -64,7 +64,6 @@ static ISOState_t g_iso;
 // ---------- Biquad ----------
 static void biquad_init(Biquad_t *bq, float fc, float fs, uint8_t type_hpf)
 {
-    // Direct Form II Transposed
     bq->z1 = 0.0f;
     bq->z2 = 0.0f;
 
@@ -102,10 +101,10 @@ static float biquad_process(Biquad_t *bq, float x)
 
 static void wk_init(WkChain_t *wk, float fs)
 {
-    biquad_init(&wk->s1, WK_F1, fs, 1); // HPF
-    biquad_init(&wk->s2, WK_F2, fs, 0); // LPF
-    biquad_init(&wk->s3, WK_F4, fs, 1); // HPF
-    biquad_init(&wk->s4, WK_F3, fs, 0); // LPF
+    biquad_init(&wk->s1, WK_F1, fs, 1); // HPF 0.4
+    biquad_init(&wk->s2, WK_F2, fs, 0); // LPF 12.5
+    biquad_init(&wk->s3, WK_F4, fs, 1); // HPF 2.37
+    biquad_init(&wk->s4, WK_F3, fs, 0); // LPF 12.5
 }
 
 static float wk_process(WkChain_t *wk, float x_ms2)
@@ -123,7 +122,7 @@ void ISO2631_Init(float fs_hz)
     memset(&g_iso, 0, sizeof(g_iso));
     g_iso.fs = (fs_hz > 1.0f) ? fs_hz : 100.0f;
 
-    // 너 예시 기준: 워밍업 2초(200), 중력오프셋 1초(100) @100Hz
+    // 기본값: 워밍업 2초(200), 중력오프셋 1초(100) @100Hz
     g_iso.warmup_samples = (uint16_t)(2.0f * g_iso.fs);
     g_iso.gravity_samples = (uint16_t)(1.0f * g_iso.fs);
 
@@ -177,8 +176,12 @@ static void compute_metrics(void)
         return;
     }
 
+    // ✅ RMS = sqrt(mean(a²))
     g_iso.out.rms = sqrtf(g_iso.sum_sq / (float)g_iso.n_meas);
+    
+    // ✅ VDV = (∫a⁴dt)^0.25 = (Σa⁴ · dt)^0.25
     g_iso.out.vdv = powf(g_iso.sum_4 * dt, 0.25f);
+    
     g_iso.out.peak = g_iso.peak_abs;
 }
 
@@ -188,9 +191,8 @@ uint8_t ISO2631_Update(float raw_z_ms2)
 
     g_iso.n_total++;
 
-    // 워밍업 동안 중력 오프셋 계산용으로 raw를 누적
+    // ✅ 워밍업 중: 중력 오프셋 계산용으로 raw 값 누적
     if (!g_iso.warmup_done) {
-
         if (g_iso.gravity_cnt < g_iso.gravity_samples) {
             g_iso.gravity_accum += raw_z_ms2;
             g_iso.gravity_cnt++;
@@ -200,7 +202,6 @@ uint8_t ISO2631_Update(float raw_z_ms2)
             if (g_iso.gravity_cnt > 0) {
                 g_iso.gravity_offset = g_iso.gravity_accum / (float)g_iso.gravity_cnt;
             } else {
-                // fallback: 그냥 1g
                 g_iso.gravity_offset = ISO_GRAVITY;
             }
             g_iso.warmup_done = 1;
@@ -209,18 +210,18 @@ uint8_t ISO2631_Update(float raw_z_ms2)
         return 0U; // 워밍업 중에는 측정 안 쌓음
     }
 
-    // 실제 측정: 중력 오프셋 제거
+    // ✅ 워밍업 완료 후: 중력 오프셋 제거
     float x = raw_z_ms2 - g_iso.gravity_offset;
 
-    // Wk weighting
+    // ✅ Wk weighting 필터 적용
     float aw = wk_process(&g_iso.wk, x);
 
-    // stats 누적
+    // ✅ 통계 누적
     float abs_aw = fabsf(aw);
     if (abs_aw > g_iso.peak_abs) g_iso.peak_abs = abs_aw;
 
     g_iso.sum_sq += aw * aw;
-    g_iso.sum_4  += (aw * aw) * (aw * aw);
+    g_iso.sum_4  += aw * aw * aw * aw;  // ✅ a⁴ 직접 계산
 
     g_iso.n_meas++;
     g_iso.idx++;

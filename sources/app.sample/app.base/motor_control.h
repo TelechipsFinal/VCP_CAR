@@ -33,7 +33,7 @@
 /* L298N ENA/ENB use PDM output (A8/A9 header) */
 #define L298N_PDM_CH_A                  (4UL)             /* CH2 + ch2 -> GPC8(A8), ENA */
 #define L298N_PDM_CH_B                  (5UL)             /* CH2 + ch3 -> GPC9(A9), ENB */
-#define L298N_PDM_OUT_SEL_CH            (GPIO_PERICH_CH2) /* GPIO_C group */
+#define L298N_PDM_OUT_SEL_CH            (GPIO_PERICH_CH3) /* GPIO_C group */
 
 void MotorControl_Init
 (
