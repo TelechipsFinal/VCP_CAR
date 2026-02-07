@@ -163,7 +163,7 @@
 #define KALMAN_R_MAX            (5.00f)  // 흔들릴 때 accel 거의 무시
 
 /* ===== 수평제어 OFF 테스트 모드 ===== */
-#define INDEPENDENT_WHEEL_TEST_MODE   (1)
+#define INDEPENDENT_WHEEL_TEST_MODE   (0)
 
 /* ===== Impact-based pre-kick tuning ===== */
 #define PREKICK_GAIN_BASE        (2.0f)   // 기본 1.0
