@@ -83,7 +83,6 @@
 #define SPEED_TASK_PRIO         (SAL_PRIO_APP_CFG + 1)
 #define STEER_TASK_PRIO         (SAL_PRIO_APP_CFG + 2)
 #define DRIVEMODE_TASK_PRIO     (SAL_PRIO_APP_CFG + 3)
-#define ADXL_MONITOR_TASK_PRIO  (SAL_PRIO_APP_CFG + 3)      // ✅ 추가
 #define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 4)      
 #define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 5)      
 #define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 6)
@@ -101,7 +100,6 @@
 #define IMU_SUSP_TASK_STK_SIZE  (512)   // 2KB (IMU/서보 연산)
 #define HEIGHT_TASK_STK_SIZE    (128)   // 512B
 #define MONITOR_TASK_STK_SIZE   (256)   // 1KB
-#define ADXL_TEST_TASK_STK_SIZE (256)   // 1KB
 #define ISO_TASK_STK_SIZE      (128)   // 1KB 정도면 충분
 
 // Control Frequencies
@@ -253,7 +251,6 @@ static uint32 gDriveModeTaskID = 0;
 static uint32 gIMUSuspTaskID = 0;
 static uint32 gHeightTaskID = 0;
 static uint32 gMonitorTaskID = 0;
-static uint32 gADXL345TestTaskID = 0;
 static uint32 gISOTaskID = 0;
 
 // Task Stacks
@@ -264,7 +261,6 @@ static uint32 gDriveModeTaskStk[DRIVEMODE_TASK_STK_SIZE];
 static uint32 gIMUSuspTaskStk[IMU_SUSP_TASK_STK_SIZE];
 static uint32 gHeightTaskStk[HEIGHT_TASK_STK_SIZE];
 static uint32 gMonitorTaskStk[MONITOR_TASK_STK_SIZE];
-static uint32 gADXL345TestTaskStk[ADXL_TEST_TASK_STK_SIZE];
 static uint32 gISOTaskStk[ISO_TASK_STK_SIZE];
 
 
@@ -511,32 +507,6 @@ static void DisplayOTPInfo(void);
 *                                         PID FUNCTIONS
 ***************************************************************************************************
 */
-
-// static void Motor_SetSpeed(float speed) {
-//     PDMModeConfig_t pwm_cfg;
-//     uint32 duty_ns;
-    
-//     // Speed to duty cycle (0-100% → 0-100% duty)
-//     duty_ns = (uint32)(speed * 200000.0f);  // 20kHz PWM (50us period)
-    
-//     if(duty_ns > 20000000) duty_ns = 20000000;
-    
-//     pwm_cfg.mcPortNumber = GPIO_PERICH_CH2;  // Motor channel (GPIO-C)
-//     pwm_cfg.mcOperationMode = PDM_OUTPUT_MODE_PHASE_1;
-//     pwm_cfg.mcInversedSignal = 0;
-//     pwm_cfg.mcOutSignalInIdle = 0;
-//     pwm_cfg.mcLoopCount = 0;
-//     pwm_cfg.mcOutputCtrl = 0x05;  // DO_Sel=1, OEN_Sel=1
-//     pwm_cfg.mcPeriodNanoSec1 = 50000;     // 50us (20kHz)
-//     pwm_cfg.mcDutyNanoSec1 = duty_ns;
-//     pwm_cfg.mcDutyNanoSec2 = 0;
-//     pwm_cfg.mcPeriodNanoSec2 = 0;
-    
-//     PDM_Disable(4, PMM_OFF);
-//     SAL_TaskSleep(1);
-//     PDM_SetConfig(4, &pwm_cfg);
-//     PDM_Enable(4, PMM_OFF);
-// }
 
 /* ===== 유틸리티 함수 ===== */
 static inline float clamp(float v, float lo, float hi) {
@@ -908,23 +878,6 @@ void Main_StartTask(void * pArg)
     #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     
     
-
-    //      //Task 6:ADXL345_Monitor
-    // err = SAL_TaskCreate(&gADXL345TestTaskID,
-    //                     (const uint8 *)"ADXL345_Monito_Test",
-    //                     (SALTaskFunc)&ADXL345_Monitor_Task, // 수정한 테스트 함수
-    //                     &gADXL345TestTaskStk[0],
-    //                     ADXL_TEST_TASK_STK_SIZE,
-    //                     ADXL_MONITOR_TASK_PRIO,
-    //                     NULL);
-
-
-
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] ADXL345 Test Task Created Successfully\n");
-    // } else {
-    //     mcu_printf("[ERROR] Failed to Create ADXL345 Test Task\n");
-    // }
     
     // Task 3: IMU + Suspension (100Hz)
     err = SAL_TaskCreate(&gIMUSuspTaskID,
@@ -2117,222 +2070,6 @@ void Monitoring_Task(void *pArg)
         mcu_printf("==========================================\n");
 
         SAL_TaskSleep(MONITOR_PERIOD_MS);
-    }
-}
-
-/*
-***************************************************************************************************
-*                                          ADXL345_Monitor_Task
-* 
-* 100Hz로 4개 ADXL345 센서를 읽어서 각 바퀴의 충격을 감지
-***************************************************************************************************
-*/
-
-static void ADXL345_Monitor_Task(void *pArg)
-{
-    (void)pArg;
-
-    uint32 start_tick;
-
-    const uint32 CAL_MS = ADXL_CAL_MS;
-    const uint32 PERIOD_MS = 10;
-    const uint32 CAL_SAMPLES = (CAL_MS / PERIOD_MS);
-
-    double sum_x[WHEEL_MAX] = {0}, sum_y[WHEEL_MAX] = {0}, sum_z[WHEEL_MAX] = {0};
-    uint32 sample_cnt = 0;
-
-    static uint32 adxl_ok_cnt = 0;
-    static uint32 adxl_fail_cnt = 0;
-
-    float prev_mag[WHEEL_MAX] = {0};
-    uint32 last_hit_ms[WHEEL_MAX] = {0};
-    static float impact_hold[WHEEL_MAX] = {0};
-
-    mcu_printf("[ADXL345] Task Started (100Hz)\n");
-
-    /* ====== 센서 설정 ====== */
-    for (uint8 dev = 0; dev < ADXL_COUNT; dev++) {
-        if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
-            mcu_printf("[ADXL345] Mux select failed for dev %d\n", dev);
-            continue;
-        }
-        
-        // ✅ Mux 안정화 대기 (마이크로초 단위면 충분)
-        // 하드웨어에 따라 1-5us 필요할 수 있음
-        for (volatile uint32 i = 0; i < 100; i++); // ~1us delay
-        
-        (void)ADXL345_WriteReg(dev, ADXL345_REG_BW_RATE,     0x0A);
-        SAL_TaskSleep(10);
-        (void)ADXL345_WriteReg(dev, ADXL345_REG_DATA_FORMAT, 0x09);
-        SAL_TaskSleep(10);
-        (void)ADXL345_WriteReg(dev, ADXL345_REG_POWER_CTL,   0x08);
-        SAL_TaskSleep(20);
-    }
-
-    mcu_printf("[ADXL345] Neutral calibration...\n");
-
-    /* ===== 1) 캘리브레이션 루프 ===== */
-    while (sample_cnt < CAL_SAMPLES) {
-        SAL_GetTickCount(&start_tick);
-
-        for (uint8 dev = 0; dev < ADXL_COUNT; dev++) {
-            float x, y, z;
-            uint8 wheel = g_ADXL_DEV_TO_WHEEL[dev];
-
-            if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
-                adxl_fail_cnt++;
-                continue;
-            }
-            
-            // ✅ Mux 안정화: 마이크로초 대기 (Sleep 제거!)
-            for (volatile uint32 i = 0; i < 100; i++);
-            
-            if (ADXL345_ReadAccelCalibrated(dev, &x, &y, &z) == SAL_RET_SUCCESS) {
-                sum_x[wheel] += (double)x;
-                sum_y[wheel] += (double)y;
-                sum_z[wheel] += (double)z;
-                adxl_ok_cnt++;
-            } else {
-                adxl_fail_cnt++;
-            }
-        }
-
-        sample_cnt++;
-
-        if ((sample_cnt % 50) == 0) {
-            float avg_z[WHEEL_MAX];
-            for (uint8 w = 0; w < WHEEL_MAX; w++) {
-                avg_z[w] = (float)(sum_z[w] / (double)sample_cnt);
-            }
-
-            mcu_printf("  [ADXL %d/%d] AVG_Z: ",
-                       (int)sample_cnt, (int)CAL_SAMPLES);
-            Print_Float_Value(avg_z[WHEEL_FL], 10); mcu_printf("/");
-            Print_Float_Value(avg_z[WHEEL_FR], 10); mcu_printf("/");
-            Print_Float_Value(avg_z[WHEEL_RL], 10); mcu_printf("/");
-            Print_Float_Value(avg_z[WHEEL_RR], 10);
-            mcu_printf(" m/s2 (ok:%d fail:%d)\n", (int)adxl_ok_cnt, (int)adxl_fail_cnt);
-        }
-
-        uint32 now;
-        SAL_GetTickCount(&now);
-        uint32 elapsed = now - start_tick;
-        if (elapsed < PERIOD_MS) {
-            SAL_TaskSleep(PERIOD_MS - elapsed);
-        }
-    }
-
-    /* ===== bias 확정 ===== */
-    for (uint8 w = 0; w < WHEEL_MAX; w++) {
-        g_ADXL_bias_x[w] = (float)(sum_x[w] / (double)CAL_SAMPLES);
-        g_ADXL_bias_y[w] = (float)(sum_y[w] / (double)CAL_SAMPLES);
-        g_ADXL_bias_z[w] = (float)(sum_z[w] / (double)CAL_SAMPLES);
-
-        prev_mag[w] = 0.0f;
-        last_hit_ms[w] = 0;
-        impact_hold[w] = 0.0f;
-    }
-
-    SAL_CoreCriticalEnter();
-    g_ADXL_CAL_DONE = 1;
-    SAL_CoreCriticalExit();
-
-    mcu_printf("\n[ADXL345] Calibration complete!\n");
-    mcu_printf("  Bias Z: ");
-    Print_Float_Value(g_ADXL_bias_z[WHEEL_FL], 10); mcu_printf("/");
-    Print_Float_Value(g_ADXL_bias_z[WHEEL_FR], 10); mcu_printf("/");
-    Print_Float_Value(g_ADXL_bias_z[WHEEL_RL], 10); mcu_printf("/");
-    Print_Float_Value(g_ADXL_bias_z[WHEEL_RR], 10);
-    mcu_printf(" m/s2\n");
-    mcu_printf("  Success: %d, Fail: %d\n", (int)adxl_ok_cnt, (int)adxl_fail_cnt);
-
-    /* ===== 2) 정상 모니터링 루프 ===== */
-    while (1) {
-        SAL_GetTickCount(&start_tick);
-
-        uint32 now;
-        SAL_GetTickCount(&now);
-        uint32 tms = now;
-
-        for (uint8 dev = 0; dev < ADXL_COUNT; dev++) {
-            float x, y, z;
-            uint8 wheel = g_ADXL_DEV_TO_WHEEL[dev];
-
-            if (ADXL_MuxSelectByDev(dev) != SAL_RET_SUCCESS) {
-                adxl_fail_cnt++;
-                
-                SAL_CoreCriticalEnter();
-                g_ADXLData.impact_detected[wheel] = 0.0f;
-                SAL_CoreCriticalExit();
-                continue;
-            }
-
-            // ✅ Mux 안정화: 마이크로초 대기
-            for (volatile uint32 i = 0; i < 100; i++);
-
-            SALRetCode_t ret = ADXL345_ReadAccelCalibrated(dev, &x, &y, &z);
-
-            if (ret == SAL_RET_SUCCESS) {
-                adxl_ok_cnt++;
-
-                /* bias 제거 */
-                x -= g_ADXL_bias_x[wheel];
-                y -= g_ADXL_bias_y[wheel];
-                z -= g_ADXL_bias_z[wheel];
-
-                float mag   = sqrtf(x*x + y*y + z*z);
-                float delta = fabsf(mag - prev_mag[wheel]);
-                prev_mag[wheel] = mag;
-
-                float impact = 0.0f;
-                if (delta >= IMPACT_THRESHOLD_MS2) {
-                    if ((tms - last_hit_ms[wheel]) >= IMPACT_COOLDOWN_MS) {
-                        last_hit_ms[wheel] = tms;
-                        impact = (delta / IMPACT_THRESHOLD_MS2) - 1.0f;
-                        impact = clamp(impact, 0.0f, 1.0f);
-                    }
-                }
-
-                if (impact > 0.0f) {
-                    uint8 axle = (wheel == WHEEL_FL || wheel == WHEEL_FR) ? 1U : 2U;
-
-                    SAL_CoreCriticalEnter();
-                    uint32 now_ms = tms;
-                    if (g_lead_axle == 0U || g_lead_axle == axle) {
-                        g_lead_axle = axle;
-                        g_lead_until_ms = now_ms + 220U;
-                    }
-                    SAL_CoreCriticalExit();
-                }
-
-                /* hold/decay */
-                impact_hold[wheel] *= 0.85f;
-                if (impact > impact_hold[wheel]) impact_hold[wheel] = impact;
-                impact = impact_hold[wheel];
-
-                SAL_CoreCriticalEnter();
-                g_ADXLData.accel_x[wheel] = x;
-                g_ADXLData.accel_y[wheel] = y;
-                g_ADXLData.accel_z[wheel] = z;
-                g_ADXLData.impact_detected[wheel] = impact;
-                SAL_GetTickCount(&g_ADXLData.last_update_time);
-                SAL_CoreCriticalExit();
-
-            } else {
-                adxl_fail_cnt++;
-
-                SAL_CoreCriticalEnter();
-                g_ADXLData.impact_detected[wheel] = 0.0f;
-                SAL_CoreCriticalExit();
-            }
-        }
-
-        uint32 end;
-        SAL_GetTickCount(&end);
-        uint32 elapsed = end - start_tick;
-        if (elapsed < PERIOD_MS) {
-            SAL_TaskSleep(PERIOD_MS - elapsed);
-        }
     }
 }
 

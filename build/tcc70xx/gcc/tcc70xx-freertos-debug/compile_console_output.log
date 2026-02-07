@@ -116,3 +116,4 @@ compile: ../../../sources/core/GCC/arm_a.S
 compile: ../../../sources/os/freertos/FreeRTOS-Kernel/portable/ARM_CR5/GCC/portASM.S
 compile: ../../../sources/os/freertos/FreeRTOS-Kernel/portable/ARM_CR5/GCC/freertos.S
 compile: ../../../sources/sal/sal.S
+compile: ../../../sources/app.sample/app.base/main.c
