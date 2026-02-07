@@ -35,6 +35,8 @@
 #include <ADXL345_test.h>
 #include <ADXL345.h>
 #include <i2c.h>
+#include "ISO2631-1.h"
+
 
 
 #if (APLT_LINUX_SUPPORT_SPI_DEMO == 1)
@@ -79,23 +81,28 @@
 #define ADXL_MONITOR_TASK_PRIO  (SAL_PRIO_APP_CFG + 3)      // ✅ 추가
 #define IMU_SUSP_TASK_PRIO      (SAL_PRIO_APP_CFG + 4)      
 #define HEIGHT_TASK_PRIO        (SAL_PRIO_APP_CFG + 5)      
-#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 6)     
+#define MONITOR_TASK_PRIO       (SAL_PRIO_APP_CFG + 6)
+#define ISO_TASK_PRIO          (SAL_PRIO_APP_CFG + 7)
+
+
+
 
 
 // Task Stack Sizes - 극한 최소화
 #define CAN_RX_TASK_STK_SIZE    (256)   // 1KB
 #define MOTOR_TASK_STK_SIZE     (128)   // 1KB
-#define IMU_SUSP_TASK_STK_SIZE  (768)   // 2KB (가장 중요) 512로 돌리기@@@@@@@@@@@@@@@
+#define IMU_SUSP_TASK_STK_SIZE  (512)   // 2KB (가장 중요) 512로 돌리기@@@@@@@@@@@@@@@
 #define HEIGHT_TASK_STK_SIZE    (128)   // 1KB
 #define MONITOR_TASK_STK_SIZE   (256)   // 1KB    
 #define ADXL_TEST_TASK_STK_SIZE (256)   // 1KB  ✅ 추가
- 
+ #define ISO_TASK_STK_SIZE      (128)   // 1KB 정도면 충분
 
 // Control Frequencies
 #define MOTOR_PERIOD_MS         (10)    // 100Hz
 #define IMU_SUSP_PERIOD_MS      (10)    // 100Hz
 #define HEIGHT_PERIOD_MS        (50)    // 20Hz
 #define MONITOR_PERIOD_MS       (100)   // 10Hz
+#define ISO_PERIOD_MS          (10)    // ✅ 100Hz (ISO 측정은 100Hz 권장)
 
 /*
 ***************************************************************************************************
@@ -235,6 +242,7 @@ static uint32 gIMUSuspTaskID = 0;
 static uint32 gHeightTaskID = 0;
 static uint32 gMonitorTaskID = 0;
 static uint32 gADXL345TestTaskID = 0;
+static uint32 gISOTaskID = 0;
 
 // Task Stacks
 static uint32 gCANRxTaskStk[CAN_RX_TASK_STK_SIZE];
@@ -243,6 +251,8 @@ static uint32 gIMUSuspTaskStk[IMU_SUSP_TASK_STK_SIZE];
 static uint32 gHeightTaskStk[HEIGHT_TASK_STK_SIZE];
 static uint32 gMonitorTaskStk[MONITOR_TASK_STK_SIZE];
 static uint32 gADXL345TestTaskStk[ADXL_TEST_TASK_STK_SIZE];
+static uint32 gISOTaskStk[ISO_TASK_STK_SIZE];
+
 
 // Shared Data Structures
 typedef struct {
@@ -393,6 +403,7 @@ static void IMU_Suspension_Task(void *pArg);
 static void Height_Control_Task(void *pArg);
 static void Monitoring_Task(void *pArg);
 static void ADXL345_Monitor_Task(void *pArg);
+static void ISO2631_Task(void *pArg);
 
 // 댐핑 PID 함수들
 
@@ -618,7 +629,6 @@ static inline float apply_deadband(float x, float db)
 }
 
 
-
 /*
 ***************************************************************************************************
 *                                          cmain
@@ -822,16 +832,32 @@ void Main_StartTask(void * pArg)
     // }
     
     // Task 5: Monitoring (10Hz)
-    err = SAL_TaskCreate(&gMonitorTaskID,
-                        (const uint8 *)"Monitoring",
-                        (SALTaskFunc)&Monitoring_Task,
-                        &gMonitorTaskStk[0],
-                        MONITOR_TASK_STK_SIZE,
-                        MONITOR_TASK_PRIO,
-                        NULL);
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
-    }
+    // err = SAL_TaskCreate(&gMonitorTaskID,
+    //                     (const uint8 *)"Monitoring",
+    //                     (SALTaskFunc)&Monitoring_Task,
+    //                     &gMonitorTaskStk[0],
+    //                     MONITOR_TASK_STK_SIZE,
+    //                     MONITOR_TASK_PRIO,
+    //                     NULL);
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
+    // }
+
+    // Task X: ISO2631 (100Hz)
+err = SAL_TaskCreate(&gISOTaskID,
+                    (const uint8 *)"ISO2631",
+                    (SALTaskFunc)&ISO2631_Task,
+                    &gISOTaskStk[0],
+                    ISO_TASK_STK_SIZE,
+                    ISO_TASK_PRIO,
+                    NULL);
+
+if(err == SAL_RET_SUCCESS) {
+    mcu_printf("[SYSTEM] ISO2631 Task Created (Priority: %d, 100Hz)\n", ISO_TASK_PRIO);
+} else {
+    mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
+}
+
 
 
 
@@ -1192,6 +1218,15 @@ void IMU_Suspension_Task(void *pArg)
             SAL_CoreCriticalExit();
         }
 
+        // // 10Hz 모니터링이면 fs=10으로 해야 계산이 맞음(권장)
+        // // 근데 ISO2631 필터는 원래 100Hz가 정석이라,
+        // // "진짜 ISO2631" 원하면 IMU_Suspension_Task(100Hz)에서 Update 돌리는게 맞아.
+        // ISO2631_Init(10.0f);            // Monitoring_Task가 10Hz라면 10.0
+        // ISO2631_SetWarmup(2.0f);        // 2초 워밍업
+        // uint32 now_ms;
+        // SAL_GetTickCount(&now_ms);
+        // ISO2631_Start(7.0f, now_ms);    // 7초 윈도우
+
          // ========== ✅ 여기에 경사 감지 로직 추가 ==========
 
         // 코드 수정
@@ -1293,7 +1328,8 @@ void IMU_Suspension_Task(void *pArg)
         uint32 now_ms;
         SAL_GetTickCount(&now_ms);
 
-        /* ===== impact select: 같은 축(front/rear)만 댐핑 허용 ===== */
+       /* ===== impact select: 같은 축(front/rear)만 댐핑 허용 ===== */
+
 float shock_raw[4];
 float shock_abs_[4];
 
@@ -1311,12 +1347,9 @@ for (uint8 i = 0; i < 4; i++) {
 
     /* HPF(충격) */
     float s = z - wheel_lp_z[i];
-
     if (fabsf(s) < SHOCK_DEADBAND) s = 0.0f;
-
     shock_raw[i]  = s;
     shock_abs_[i] = fabsf(s);
-
     if (shock_abs_[i] > a1) {
         a1 = shock_abs_[i];
         top1 = i;
@@ -1324,7 +1357,9 @@ for (uint8 i = 0; i < 4; i++) {
 }
 
 /* 2) top1 축(front/rear) 결정 */
+
 uint8 lead_axle = 0;  // 1=front, 2=rear, 0=none
+
 if (a1 > 0.0f) {
     lead_axle = (top1 == WHEEL_FL || top1 == WHEEL_FR) ? 1U : 2U;
 }
@@ -1344,14 +1379,13 @@ if (lead_axle == 1U) {
 }
 
 /* 4) 같은 축 2바퀴 동시 충격 인정 조건 */
+
 uint8 allow_any = (lead_axle != 0U) ? 1U : 0U;
 uint8 allow2 = 0U;
 if (allow_any) {
     allow2 = (a2 >= a1 * 0.70f) ? 1U : 0U;   // 0.6~0.8 튜닝
 }
-
   for (uint8 i = 0; i < 4; i++) {
-
     /* ✅ 선택된 바퀴인가? */
     uint8 selected = 0U;
     if (allow_any) {
@@ -1364,34 +1398,26 @@ if (allow_any) {
         continue;
     }
 
-
 float shock = shock_raw[i];
-
 /* ✅ 무조건 크기만 사용 (방향 제거) */
 float mag = fabsf(shock);
-
 /* ✅ 짧아지는 방향으로만: response 부호를 고정
    - 여기서 '-'가 “짧아지는 방향”이라고 가정.
    - 만약 실제가 반대면 아래 response 부호만 '+'로 바꾸면 됨.
 */
 const float DAMP_GAIN = 20.0f;
 float response = -mag * DAMP_GAIN;
-
     /* decay */
     shock_absorb[i] *= 0.80f;
-
     if (fabsf(response) > fabsf(shock_absorb[i])) {
         shock_absorb[i] = response;
     }
-
     if (fabsf(shock_absorb[i]) > 20.0f) {
         shock_absorb[i] *= 0.50f;
     }
-
     if (fabsf(shock_absorb[i]) < 0.5f) {
         shock_absorb[i] = 0.0f;
     }
-
     shock_absorb[i] = clamp(shock_absorb[i], -30.0f, 30.0f);
 }
 
@@ -2068,6 +2094,144 @@ static void ADXL345_Monitor_Task(void *pArg)
         } else {
             // overrun 디버그(선택)
             // mcu_printf("[ADXL] overrun %d ms\n", (int)(elapsed - PERIOD_MS));
+        }
+    }
+}
+
+static void ISO2631_Print_Box(const ISO2631_Metrics_t *m)
+{
+    mcu_printf("\r\n");
+    mcu_printf("=============================================\r\n");
+    mcu_printf(" ISO 2631-1 VIBRATION MEASUREMENT RESULTS\r\n");
+    mcu_printf("=============================================\r\n");
+
+    mcu_printf("Duration: ");
+    Print_Float_Value(m->duration_s, 100);
+    mcu_printf(" seconds\r\n");
+
+    mcu_printf("Samples: %d\r\n", (int)m->samples);
+
+    mcu_printf("Sample Rate: ");
+    Print_Float_Value(m->fs_hz, 10);
+    mcu_printf(" Hz\r\n");
+
+    mcu_printf("Gravity Offset: ");
+    Print_Float_Value(m->gravity_offset_ms2 / 9.81f, 10000);
+    mcu_printf(" g\r\n");
+
+    mcu_printf("---------------------------------------------\r\n");
+
+    mcu_printf("RMS (a_w): ");
+    Print_Float_Value(m->rms, 10000);
+    mcu_printf(" m/s^2\r\n");
+
+    mcu_printf("VDV: ");
+    Print_Float_Value(m->vdv, 10000);
+    mcu_printf(" m/s^1.75\r\n");
+
+    mcu_printf("Peak Accel: ");
+    Print_Float_Value(m->peak, 10000);
+    mcu_printf(" m/s^2\r\n");
+
+    mcu_printf("---------------------------------------------\r\n");
+
+    mcu_printf("Comfort Assessment (8-hour exposure):\r\n");
+    if (m->rms < 0.315f)      mcu_printf("Status: NOT UNCOMFORTABLE\r\n");
+    else if (m->rms < 0.63f)  mcu_printf("Status: A LITTLE UNCOMFORTABLE\r\n");
+    else if (m->rms < 1.0f)   mcu_printf("Status: FAIRLY UNCOMFORTABLE\r\n");
+    else if (m->rms < 1.6f)   mcu_printf("Status: UNCOMFORTABLE\r\n");
+    else if (m->rms < 2.5f)   mcu_printf("Status: VERY UNCOMFORTABLE\r\n");
+    else                      mcu_printf("Status: EXTREMELY UNCOMFORTABLE\r\n");
+
+    mcu_printf("=============================================\r\n\r\n");
+}
+
+static void ISO2631_Task(void *pArg)
+{
+    (void)pArg;
+
+    // ✅ 시스템 준비 완료(캘리브/안정화 끝) 기다림
+    while (1) {
+        uint8 ready;
+        SAL_CoreCriticalEnter();
+        ready = g_SYSTEM_READY;
+        SAL_CoreCriticalExit();
+
+        if (ready) break;
+        SAL_TaskSleep(50);
+    }
+
+    mcu_printf("[ISO2631] Task Started (100Hz)\n");
+
+    // ISO 모듈 초기화 + 7초 윈도우 시작
+    ISO2631_Init(100.0f);                 // ✅ 100Hz
+    ISO2631_SetWarmup(200, 100);          // 워밍업 2초, 중력오프셋 1초
+    ISO2631_Start(700);                   // 7초 @100Hz
+
+    uint32 start_tick = 0;
+    uint32 now = 0;
+
+    while (1) {
+        SAL_GetTickCount(&start_tick);
+
+        // IMU Z축 가속도 스냅샷
+        float az = 0.0f;
+        SAL_CoreCriticalEnter();
+        az = g_IMUData.accel_z;
+
+        // 만약 g 단위라면 m/s^2로 변환 (둘 중 하나만 쓰면 됨)
+        // 1) g로 들어온다고 가정할 때:
+        az = az * 9.80665f;
+
+        SAL_CoreCriticalExit();
+
+        /* ===== ISO input debug: 처음 200샘플과 min/max 확인 ===== */
+        static uint32 dbg_cnt = 0;
+        static float  az_min =  1e9f;
+        static float  az_max = -1e9f;
+        static uint32 az_zero_cnt = 0;
+
+        if (az < az_min) az_min = az;
+        if (az > az_max) az_max = az;
+        if (fabsf(az) < 1e-6f) az_zero_cnt++;
+
+        if (dbg_cnt < 20) {
+            mcu_printf("[ISO_DBG] az=");
+            Print_Float_Value(az, 1000);
+            mcu_printf("\n");
+        }
+
+        if (dbg_cnt == 200) {
+            mcu_printf("[ISO_DBG] az_min/max=");
+            Print_Float_Value(az_min, 1000);
+            mcu_printf("/");
+            Print_Float_Value(az_max, 1000);
+            mcu_printf("  zero_cnt=%d/201\n", (int)az_zero_cnt);
+        }
+        dbg_cnt++;
+
+
+        SAL_GetTickCount(&now);
+
+        // 샘플 업데이트
+        uint8 done = ISO2631_Update(az);
+
+        // 윈도우 완료 시 출력 + 자동 재시작
+        if (done == 1U) {
+            ISO2631_Metrics_t m = ISO2631_GetMetrics();
+            ISO2631_Print_Box(&m);
+
+            // 다음 7초 측정 자동 재시작
+            ISO2631_Start(700);
+        }
+        
+
+        // 정확히 100Hz 유지
+        uint32 end_tick;
+        SAL_GetTickCount(&end_tick);
+        uint32 elapsed = end_tick - start_tick;
+        if (elapsed < ISO_PERIOD_MS) {
+            SAL_TaskSleep(ISO_PERIOD_MS - elapsed);
         }
     }
 }
