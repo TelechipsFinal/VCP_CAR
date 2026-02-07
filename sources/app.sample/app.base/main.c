@@ -53,7 +53,6 @@
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     #include <can_demo.h>
-    #include <can_control.h>
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_IDLE == 1 )
@@ -116,16 +115,6 @@
 #define DERIVATIVE_FILTER       0.7f
 #define DEADBAND                0.5f
 
-/* ===== 댐핑 PID 게인 (속도별) ===== */
-#define DAMPING_KP_SOFT     0.8f
-#define DAMPING_KP_MEDIUM   1.4f
-#define DAMPING_KP_HARD     2.0f
-
-#define DAMPING_KD_SOFT     0.10f
-#define DAMPING_KD_MEDIUM   0.15f
-#define DAMPING_KD_HARD     0.20f
-
-
 /* ===== 속도 임계값 ===== */
 #define SPEED_THRESHOLD_LOW     30.0f
 #define SPEED_THRESHOLD_HIGH    70.0f
@@ -167,7 +156,7 @@
 #define KALMAN_R_MAX            (5.00f)  // 흔들릴 때 accel 거의 무시
 
 /* ===== 수평제어 OFF 테스트 모드 ===== */
-#define INDEPENDENT_WHEEL_TEST_MODE   (0)
+#define INDEPENDENT_WHEEL_TEST_MODE   (1)
 
 /* ===== Impact-based pre-kick tuning ===== */
 #define PREKICK_GAIN_BASE        (2.0f)   // 기본 1.0
@@ -212,6 +201,22 @@
 
 static volatile uint8  g_lead_axle = 0;   // 0:none, 1:front, 2:rear
 static volatile uint32 g_lead_until_ms = 0;
+
+/* ===== FAST BOOT ===== */
+#define FAST_BOOT_MODE             1
+
+#if FAST_BOOT_MODE
+  #define SERVO_SETTLE_MS          (200U)   // 기존 1000ms → 200ms
+  #define IMU_CAL_MS               (600U)   // 기존 3000ms → 600ms
+  #define IMU_STAB_SAMPLES         (40U)    // 기존 200 → 40 (10ms 주기면 0.4s)
+  #define ADXL_CAL_MS              (600U)   // 기존 3000ms → 600ms
+#else
+  #define SERVO_SETTLE_MS          (1000U)
+  #define IMU_CAL_MS               (3000U)
+  #define IMU_STAB_SAMPLES         (200U)
+  #define ADXL_CAL_MS              (3000U)
+#endif
+
 
 
 /*
@@ -332,30 +337,23 @@ typedef struct {
 } ADXL_Data_t;
 
 static ADXL_Data_t g_ADXLData;
-static PID_Damping_t pid_damping_wheel[4];  // 각 바퀴별 댐핑 PID
 
 typedef struct {
-    float leveling[4];      // FL FR RL RR
-    float pid_roll_out_mm;  // pid_roll.output (mm)
-    float pid_pitch_out_mm; // pid_pitch.output (mm)
-    float soft_w;           // 0~1
-    float rate_deg_s;       // deg/sec
-    float max_step;         // deg/cycle
-
-    // ✅ debug 추가
+    float leveling[4];
+    float pid_roll_out_mm;
+    float pid_pitch_out_mm;
+    float soft_w;
+    float rate_deg_s;
+    float max_step;
     float roll_acc_deg;
     float pitch_acc_deg;
     float gyro_x_dps;
     float gyro_y_dps;
     float gyro_z_dps;
-
     float pid_roll_integral;
     float pid_pitch_integral;
-
-    float pre_kick_deg[4];
-    float damp_out[4];
+    float shock_absorb[4];  // ✅ 수정: pre_kick_deg + damp_out 대신 이것만
     float target_deg[4];
-
 } SuspDbg_t;
 
 static volatile SuspDbg_t g_SuspDbg;
@@ -363,79 +361,6 @@ static volatile SuspDbg_t g_SuspDbg;
 static float gyro_bias_x = 0.0f;
 static float gyro_bias_y = 0.0f;
 static float gyro_bias_z = 0.0f;
-
-/*
-***************************************************************************************************
-*                                         DRIVING MODE (STRUCTURE ONLY)
-***************************************************************************************************
-*/
-static volatile DriveMode_t g_DriveMode = DRIVE_MODE_NORMAL;
-static volatile uint8 g_DriveModeAutoEnabled = 0U;
-static const float g_DriveModeHeightOffsetDeg[3] = {
-    10.0f,   /* COMFORT */
-    0.0f,    /* NORMAL */
-    -10.0f   /* SPORT */
-};
-static const float g_DriveModeRawTargetScale[3] = {
-    1.2f,   /* COMFORT */
-    1.0f,   /* NORMAL */
-    0.8f    /* SPORT */
-};
-static const float g_DriveModeRateScale[3] = {
-    1.2f,   /* COMFORT */
-    1.0f,   /* NORMAL */
-    0.8f    /* SPORT */
-};
-
-void DriveMode_Set(DriveMode_t mode)
-{
-    if (mode > DRIVE_MODE_SPORT) {
-        mode = DRIVE_MODE_NORMAL;
-    }
-    g_DriveMode = mode;
-    g_HeightData.height_offset = g_DriveModeHeightOffsetDeg[(uint8)g_DriveMode];
-}
-
-DriveMode_t DriveMode_Get(void)
-{
-    return g_DriveMode;
-}
-
-const char *DriveMode_ToString(DriveMode_t mode)
-{
-    switch (mode) {
-        case DRIVE_MODE_COMFORT: return "COMFORT";
-        case DRIVE_MODE_NORMAL:  return "NORMAL";
-        case DRIVE_MODE_SPORT:   return "SPORT";
-        default:                 return "NORMAL";
-    }
-}
-
-void DriveMode_SetAutoEnabled(uint8 enable)
-{
-    g_DriveModeAutoEnabled = (enable != 0U) ? 1U : 0U;
-}
-
-uint8 DriveMode_IsAutoEnabled(void)
-{
-    return g_DriveModeAutoEnabled;
-}
-
-void DriveMode_UpdateAutoBySpeed(uint32 speed)
-{
-    uint32 s = speed;
-    if (s > 1000U) s = 1000U;
-
-    if (s == 0U) {
-        DriveMode_Set(DRIVE_MODE_NORMAL);
-    } else if (s <= 699U) {
-        DriveMode_Set(DRIVE_MODE_COMFORT);
-    } else if (s <= 899U) {
-        DriveMode_Set(DRIVE_MODE_NORMAL);
-    } else {
-        DriveMode_Set(DRIVE_MODE_SPORT);
-    }
-}
 
 
 typedef enum {
@@ -454,7 +379,7 @@ static const char *g_wheel_name[WHEEL_MAX] = { "FL", "FR", "RL", "RR" };
  */
 static const uint8 g_ADXL_DEV_TO_WHEEL[ADXL_COUNT] = { WHEEL_RL, WHEEL_FL, WHEEL_RR, WHEEL_FR };
 
-static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick(ms)
+
 /*
 ***************************************************************************************************
 *                                         FUNCTION PROTOTYPES
@@ -470,9 +395,6 @@ static void Monitoring_Task(void *pArg);
 static void ADXL345_Monitor_Task(void *pArg);
 
 // 댐핑 PID 함수들
-static void PID_Damping_Init(PID_Damping_t *pid, float Kp, float Ki, float Kd, float dt_ms);
-static float PID_Damping_Update(PID_Damping_t *pid, float setpoint, float measurement);
-static void PID_Damping_Reset(PID_Damping_t *pid);
 
 static void Motor_SetSpeed(float speed);
 static void AppTaskCreate(void);
@@ -486,43 +408,6 @@ static void DisplayOTPInfo(void);
 ***************************************************************************************************
 */
 
-/* ===== 댐핑 PID 함수들 ===== */
-static void PID_Damping_Init(PID_Damping_t *pid, float Kp, float Ki, float Kd, float dt_ms) {
-    pid->Kp = Kp;
-    pid->Ki = Ki;
-    pid->Kd = Kd;
-    pid->dt = dt_ms / 1000.0f;
-    pid->integral = 0;
-    pid->prev_error = 0;
-    pid->integral_max = 50.0f;
-}
-
-static float PID_Damping_Update(PID_Damping_t *pid, float setpoint, float measurement) {
-    float error = setpoint - measurement;
-    
-    // Proportional
-    float P = pid->Kp * error;
-    
-    // Integral (Anti-windup)
-    pid->integral += error * pid->dt;
-    if(pid->integral > pid->integral_max) pid->integral = pid->integral_max;
-    if(pid->integral < -pid->integral_max) pid->integral = -pid->integral_max;
-    float I = pid->Ki * pid->integral;
-    
-    // Derivative
-    float derivative = (error - pid->prev_error) / pid->dt;
-    float D = pid->Kd * derivative;
-    
-    pid->prev_error = error;
-    
-    return P + I + D;
-}
-
-
-static void PID_Damping_Reset(PID_Damping_t *pid) {
-    pid->integral = 0;
-    pid->prev_error = 0;
-}
 
 static void Motor_SetSpeed(float speed) {
     PDMModeConfig_t pwm_cfg;
@@ -834,6 +719,26 @@ void Main_StartTask(void * pArg)
     
     mcu_printf("\n[SYSTEM] Initializing...\n");
 
+    // ✅ 1. 서보 먼저 중립으로 (모든 태스크 생성 전)
+    mcu_printf("[SERVO] Initializing to neutral...\n");
+    uint32 neutral_pulse[4] = {
+        SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS,
+        SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS
+    };
+    
+    Servo_Init();
+    Servo_SetPulseAllNs(neutral_pulse);
+    
+    SAL_CoreCriticalEnter();
+    for(uint8 i = 0; i < 4; i++){
+        g_ServoData.position[i] = (float)NS_TO_US(SERVO_NEUTRAL_PULSE_NS);
+    }
+    SAL_CoreCriticalExit();
+    
+    mcu_printf("[SERVO] Stabilizing...\n");
+    SAL_TaskSleep(SERVO_SETTLE_MS);
+
+
     //Initialize IMU
     if(ICM_20948_Init() == 0) {
         mcu_printf("[SYSTEM] IMU Initialized\n");
@@ -935,13 +840,6 @@ void Main_StartTask(void * pArg)
     
     // Main task finished
     while(1) {
-        #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
-          CAN_ControlPoll();
-        //   CAN_ControlSendSpeed();
-        #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
-        mcu_printf("[DRIVE] mode=%s auto=%d\n",
-                   DriveMode_ToString(DriveMode_Get()),
-                   (int)DriveMode_IsAutoEnabled());
         SAL_TaskSleep(1000);
     }
     
@@ -1048,38 +946,27 @@ void IMU_Suspension_Task(void *pArg)
     (void)pArg;
 
     uint32 start_tick, current_tick;
-
     double gx_sum = 0.0, gy_sum = 0.0, gz_sum = 0.0;
-
     uint32 servo_pulse_ns[4] = {
         SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS,
         SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS
     };
-
     static uint32 imu_sample_count = 0;
-
-    /* ✅ Neutral 3초 캘리브 + 안정화 */
     static uint8 calibration_done = 0;
-
     double icm_roll_sum = 0.0, icm_pitch_sum = 0.0;
     uint32 calib_samples = 0;
-
-    const uint32 CAL_MS = 3000;
+    const uint32 CAL_MS = IMU_CAL_MS;
     const uint32 PERIOD_MS = IMU_SUSP_PERIOD_MS;
     const uint32 CALIB_SAMPLES = (CAL_MS / PERIOD_MS);
-    const uint32 STABILIZATION_SAMPLES = 200;
+    const uint32 STABILIZATION_SAMPLES = IMU_STAB_SAMPLES;
 
     IMU_Data imuRaw;
 
-    // ADXL 관련
+    // ✅ 수정: ADXL 관련 변수
     static float wheel_lp_z[4] = {0};
-    static float adxl_pre_kick[4] = {0};
-    static float impact_filt[4] = {0};   // ✅ impact_detected LPF
-    static float wheel_vel_z[4] = {0};   // ✅ 바퀴 수직 속도 추정 (m/s)
-
-    static int bump_wheel = -1;
-    static uint32 bump_until_ms = 0;
-
+    static float shock_absorb[4] = {0};  // ✅ 새로운 충격 상쇄 출력
+    static float impact_filt[4] = {0};
+    
     static float servo_current_deg[4] = {0, 0, 0, 0};
 
 
@@ -1089,15 +976,13 @@ void IMU_Suspension_Task(void *pArg)
     static uint32 slope_sample_count = 0;
     // ===============================================
 
+    
+
     mcu_printf("[IMU_SUSP] Task Started\n");
     mcu_printf("  - Leveling: STM32 PID (geometric)\n");
     mcu_printf("  - Damping: ADXL per-wheel\n");
     mcu_printf("  - Servo follow: deg/sec rate limiting\n\n");
 
-    // ✅ 서보 중립으로 먼저 이동
-    mcu_printf("[SERVO] Moving to neutral position...\n");
-    Servo_Init();
-    Servo_SetPulseAllNs(servo_pulse_ns);
     
     for (uint8 i = 0; i < 4; i++) servo_current_deg[i] = 0.0f;
 
@@ -1107,14 +992,6 @@ void IMU_Suspension_Task(void *pArg)
     }
     g_IMU_SUSP_INIT_DONE = 1;
     SAL_CoreCriticalExit();
-
-    // 댐핑 PID 초기화
-    for (uint8 i = 0; i < 4; i++) {
-    // Init에서 Ki=0 유지, Kd=0으로 두고 시작
-    PID_Damping_Init(&pid_damping_wheel[i],
-                    DAMPING_KP_MEDIUM, 0.0f, 0.0f,
-                    IMU_SUSP_PERIOD_MS);
-    }
 
     // ✅ 서보 안정화 대기 (1초)
     mcu_printf("[SERVO] Waiting for servo stabilization (1s)...\n");
@@ -1203,15 +1080,16 @@ void IMU_Suspension_Task(void *pArg)
                 Print_Float_Value(gyro_bias_z, 100);
                 mcu_printf(" dps\n");
 
-                mcu_printf("\n[CALIB] Waiting for ADXL bias calibration...\n");
-                while (1) {
-                    uint8 adxl_ok;
-                    SAL_CoreCriticalEnter();
-                    adxl_ok = g_ADXL_CAL_DONE;
-                    SAL_CoreCriticalExit();
-                    if (adxl_ok) break;
-                    SAL_TaskSleep(20);
+                /* ✅ ADXL 캘리브는 백그라운드로 진행. 아직이면 shock_absorb는 0으로 */
+                uint8 adxl_ok;
+                SAL_CoreCriticalEnter();
+                adxl_ok = g_ADXL_CAL_DONE;
+                SAL_CoreCriticalExit();
+
+                if (!adxl_ok) {
+                    mcu_printf("[CALIB] ADXL not ready yet -> shock absorb disabled temporarily\n");
                 }
+
 
                 calibration_done = 1;
                 imu_sample_count = 0;
@@ -1335,7 +1213,6 @@ void IMU_Suspension_Task(void *pArg)
         // ========== 4. 상태 읽기 (Safety 제거) ==========
         SAL_CoreCriticalEnter();
         uint8 leveling_on   = g_CANData.leveling_enable;
-        float current_speed = g_MotorData.current_speed;
         SAL_CoreCriticalExit();
 
         // Safety 대신 직접 값 지정
@@ -1343,17 +1220,15 @@ void IMU_Suspension_Task(void *pArg)
         float range_limit = 1.0f;
 
         // ========== 5. 비상 시 중립 복귀 (Safety 제거) ==========
-        if (susp_disabled) {  // safety 조건 제거
-            reset_leveling_pid(&pid_roll);
-            reset_leveling_pid(&pid_pitch);
+        if (susp_disabled) {
+                    reset_leveling_pid(&pid_roll);
+                    reset_leveling_pid(&pid_pitch);
 
-            for (uint8 i = 0; i < 4; i++) {
-                PID_Damping_Reset(&pid_damping_wheel[i]);
-                adxl_pre_kick[i] = 0.0f;
-                wheel_lp_z[i] = 0.0f;
-                wheel_vel_z[i] = 0.0f;
-                servo_current_deg[i] *= 0.95f;
-            }
+                    for (uint8 i = 0; i < 4; i++) {
+                        shock_absorb[i] = 0.0f;  // ✅ 수정
+                        wheel_lp_z[i] = 0.0f;
+                        servo_current_deg[i] *= 0.95f;
+                    }
 
             for (uint8 i = 0; i < 4; i++) {
                 servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
@@ -1371,13 +1246,24 @@ void IMU_Suspension_Task(void *pArg)
         }
 
         // ========== 6. ADXL 읽기 + LPF + Pre-kick ==========
+
+        uint8 adxl_ready;
+        SAL_CoreCriticalEnter();
+        adxl_ready = g_ADXL_CAL_DONE;
+        SAL_CoreCriticalExit();
+
+        if (!adxl_ready) {
+            for (uint8 i = 0; i < 4; i++) {
+                shock_absorb[i] = 0.0f;
+            }
+            // 그래도 leveling은 돌리고 싶으면 continue 하지 말고 그냥 shock만 0
+        }
+
         float wheel_accel_z[4];
-        float wheel_impact[4];
 
         SAL_CoreCriticalEnter();
         for (uint8 i = 0; i < 4; i++) {
             wheel_accel_z[i] = g_ADXLData.accel_z[i];
-            wheel_impact[i]  = g_ADXLData.impact_detected[i];   // ✅ 추가
         }
         SAL_CoreCriticalExit();
 
@@ -1407,142 +1293,108 @@ void IMU_Suspension_Task(void *pArg)
         uint32 now_ms;
         SAL_GetTickCount(&now_ms);
 
-        uint8 lead_axle;
-        uint32 lead_until;
-        SAL_CoreCriticalEnter();
-        lead_axle  = g_lead_axle;
-        lead_until = g_lead_until_ms;
-        SAL_CoreCriticalExit();
+        /* ===== impact select: 같은 축(front/rear)만 댐핑 허용 ===== */
+float shock_raw[4];
+float shock_abs_[4];
 
-        uint8 lead_active = (lead_axle != 0U) && (now_ms < lead_until);
-        uint8 inhibit_rear  = (lead_active && (lead_axle == 1U)); // 앞이 먼저 맞으면 뒤 inhibit
-        uint8 inhibit_front = (lead_active && (lead_axle == 2U)); // 뒤가 먼저 맞으면 앞 inhibit
-        
-        // Pre-kick 가중치
-        float kick_w;
-        if (slope_like) {
-            kick_w = 0.0f;
-        } else {
-            uint32 elapsed_samples = imu_sample_count - STABILIZATION_SAMPLES;
-            if (elapsed_samples < 300) {
-                kick_w = (float)elapsed_samples / 300.0f;
-            } else {
-                kick_w = 1.0f;
-            }
-        }
+uint8 top1 = 0;
+float a1 = 0.0f;
 
-        for (uint8 i = 0; i < 4; i++) {
-            float z = wheel_accel_z[i];
+const float SHOCK_DEADBAND = 2.0f;   // 너 값 유지
 
-            // LPF(중력/경사)
-            wheel_lp_z[i] += alpha * (z - wheel_lp_z[i]);
+/* 1) 모든 바퀴 HPF 계산 + top1 찾기 */
+for (uint8 i = 0; i < 4; i++) {
+    float z = wheel_accel_z[i];
 
-            // HPF(충격)
-            float hp = z - wheel_lp_z[i];
+    /* LPF(중력/경사 성분) */
+    wheel_lp_z[i] += alpha * (z - wheel_lp_z[i]);
 
-            /* ✅ impact_detected(0~1) LPF + deadband */
-            float imp = clamp(wheel_impact[i], 0.0f, 1.0f);
-            if (imp < PREKICK_IMPACT_DEADBAND) imp = 0.0f;
+    /* HPF(충격) */
+    float s = z - wheel_lp_z[i];
 
-                /* ✅ LEAD AXLE inhibit: 반대축은 pre-kick 트리거 차단 */
-            if ((inhibit_rear  && (i == WHEEL_RL || i == WHEEL_RR)) ||
-                (inhibit_front && (i == WHEEL_FL || i == WHEEL_FR))) {
-                imp = 0.0f;
-            }
+    if (fabsf(s) < SHOCK_DEADBAND) s = 0.0f;
 
-            impact_filt[i] += PREKICK_IMPACT_LPF * (imp - impact_filt[i]);  // 1pole LPF
+    shock_raw[i]  = s;
+    shock_abs_[i] = fabsf(s);
 
-            /* ✅ 충격 강도에 따른 배수(최대 PREKICK_GAIN_BASE + PREKICK_GAIN_MAX_ADD) */
-            float kick_gain = PREKICK_GAIN_BASE + PREKICK_GAIN_MAX_ADD * impact_filt[i];
+    if (shock_abs_[i] > a1) {
+        a1 = shock_abs_[i];
+        top1 = i;
+    }
+}
 
-            /* 기존 decay */
-            adxl_pre_kick[i] *= PRE_KICK_DECAY;
+/* 2) top1 축(front/rear) 결정 */
+uint8 lead_axle = 0;  // 1=front, 2=rear, 0=none
+if (a1 > 0.0f) {
+    lead_axle = (top1 == WHEEL_FL || top1 == WHEEL_FR) ? 1U : 2U;
+}
 
-            /* ✅ 트리거 조건: hp 임계치 OR impact 신호가 들어온 경우 */
-            if ((fabsf(hp) > PREKICK_HP_THRESHOLD) || (impact_filt[i] > 0.05f)) {
-                float dir;
-                if (fabsf(hp) > 0.01f) dir = (hp > 0.0f) ? -1.0f : +1.0f;
-                else                   dir = (adxl_pre_kick[i] >= 0.0f) ? +1.0f : -1.0f;
+/* 3) 같은 축에서 top2 찾기 */
+uint8 top2 = top1;
+float a2 = 0.0f;
 
-               adxl_pre_kick[i] = dir * (PRE_KICK_MAGNITUDE * kick_gain);
-            }
+if (lead_axle == 1U) {
+    uint8 a = WHEEL_FL, b = WHEEL_FR;
+    top2 = (top1 == a) ? b : a;
+    a2 = shock_abs_[top2];
+} else if (lead_axle == 2U) {
+    uint8 a = WHEEL_RL, b = WHEEL_RR;
+    top2 = (top1 == a) ? b : a;
+    a2 = shock_abs_[top2];
+}
 
-            /* 너무 작은 값 컷 */
-            if (fabsf(adxl_pre_kick[i]) < 0.1f) {
-                adxl_pre_kick[i] = 0.0f;
-            }
+/* 4) 같은 축 2바퀴 동시 충격 인정 조건 */
+uint8 allow_any = (lead_axle != 0U) ? 1U : 0U;
+uint8 allow2 = 0U;
+if (allow_any) {
+    allow2 = (a2 >= a1 * 0.70f) ? 1U : 0U;   // 0.6~0.8 튜닝
+}
 
-            /* 기존 kick_w(초기 구간 ramp-up / 경사에서 off) 유지 */
-            adxl_pre_kick[i] *= kick_w;
-        }
+  for (uint8 i = 0; i < 4; i++) {
 
+    /* ✅ 선택된 바퀴인가? */
+    uint8 selected = 0U;
+    if (allow_any) {
+        if (i == top1) selected = 1U;
+        else if (allow2 && (i == top2)) selected = 1U;
+    }
 
-        /* =========================================================
-        * ✅ bump_mode: 방지턱/충격 구간 판단 (impact 기반)
-        * ========================================================= */
-        float imp_max = impact_filt[0];
-        for (int i = 1; i < 4; i++) {
-            if (impact_filt[i] > imp_max) imp_max = impact_filt[i];
-        }
-
-        /* 0.12~0.20 사이 튜닝 */
-        uint8 bump_mode = (imp_max > 0.15f) ? 1U : 0U;
-
-        SAL_GetTickCount(&now_ms);
-
-        /* max1/max2 찾기 */
-        float max1 = -1.0f, max2 = -1.0f;
-        int idx1 = -1;
-        for (int i = 0; i < 4; i++) {
-            float v = impact_filt[i];
-            if (v > max1) { max2 = max1; max1 = v; idx1 = i; }
-            else if (v > max2) { max2 = v; }
-        }
-
-        /* 2개 이상 같이 터졌는지 */
-        uint8 multi = (max1 >= IMP_DOM_THR) && (max2 >= IMP_COIN_THR);
-
-        /* (1) 단일 휠 충격이면: 나머지 3개 inhibit */
-        /* ✅ 단일휠 bump면 그 바퀴를 잠깐 latch */
-        if ((max1 >= IMP_DOM_THR) && !multi && (idx1 >= 0)) {
-            bump_wheel = idx1;
-            bump_until_ms = now_ms + 150U;   // 100~250ms 튜닝
-        }
-
-        /* latch 만료 */
-        if ((bump_wheel >= 0) && (now_ms >= bump_until_ms)) {
-            bump_wheel = -1;
-        }
+    if (!selected) {
+        shock_absorb[i] = 0.0f;   // ✅ 잔여값 제거: 다른 바퀴가 절대 안 움직임
+        continue;
+    }
 
 
-        /* (2) 동시 충격이면: “축” 동시를 특별취급
-        - 앞2개 동시: 뒤쪽 잠깐 inhibit
-        - 뒤2개 동시: 앞쪽 잠깐 inhibit
-        - 대각선/3~4개: inhibit 안 거는게 보통 안정적 */
-        if (multi) {
-            uint8 front_hit = (impact_filt[WHEEL_FL] >= IMP_COIN_THR) &&
-                            (impact_filt[WHEEL_FR] >= IMP_COIN_THR);
+float shock = shock_raw[i];
 
-            uint8 rear_hit  = (impact_filt[WHEEL_RL] >= IMP_COIN_THR) &&
-                            (impact_filt[WHEEL_RR] >= IMP_COIN_THR);
+/* ✅ 무조건 크기만 사용 (방향 제거) */
+float mag = fabsf(shock);
 
-            if (front_hit && !rear_hit) {
-                uint32 until = now_ms + INHIBIT_MS_AXLE;
-                if (until > inhibit_until_ms[WHEEL_RL]) inhibit_until_ms[WHEEL_RL] = until;
-                if (until > inhibit_until_ms[WHEEL_RR]) inhibit_until_ms[WHEEL_RR] = until;
-            } else if (rear_hit && !front_hit) {
-                uint32 until = now_ms + INHIBIT_MS_AXLE;
-                if (until > inhibit_until_ms[WHEEL_FL]) inhibit_until_ms[WHEEL_FL] = until;
-                if (until > inhibit_until_ms[WHEEL_FR]) inhibit_until_ms[WHEEL_FR] = until;
-            }
-        }
+/* ✅ 짧아지는 방향으로만: response 부호를 고정
+   - 여기서 '-'가 “짧아지는 방향”이라고 가정.
+   - 만약 실제가 반대면 아래 response 부호만 '+'로 바꾸면 됨.
+*/
+const float DAMP_GAIN = 20.0f;
+float response = -mag * DAMP_GAIN;
 
-        for (uint8 i = 0; i < 4; i++) {
-            if (now_ms < inhibit_until_ms[i]) {
-                adxl_pre_kick[i] = 0.0f;    // 프리킥은 끊는 게 효과 좋음
-                // impact_filt[i] *= 0.7f;  // (선택) 잔향 줄여서 재트리거 방지
-            }
-        }
+    /* decay */
+    shock_absorb[i] *= 0.80f;
+
+    if (fabsf(response) > fabsf(shock_absorb[i])) {
+        shock_absorb[i] = response;
+    }
+
+    if (fabsf(shock_absorb[i]) > 20.0f) {
+        shock_absorb[i] *= 0.50f;
+    }
+
+    if (fabsf(shock_absorb[i]) < 0.5f) {
+        shock_absorb[i] = 0.0f;
+    }
+
+    shock_absorb[i] = clamp(shock_absorb[i], -30.0f, 30.0f);
+}
+
 
         // ========== 7. 레벨링 PID ==========
         float leveling[4] = {0, 0, 0, 0};
@@ -1604,26 +1456,23 @@ void IMU_Suspension_Task(void *pArg)
             float roll_height_mm  = angle_to_height_mm(roll_for_level,  TRACK_WIDTH_MM * 0.5f);
             float pitch_height_mm = angle_to_height_mm(pitch_for_level, WHEELBASE_MM   * 0.5f);
 
-            roll_height_mm  = apply_deadband(roll_height_mm,  0.3f);
-            pitch_height_mm = apply_deadband(pitch_height_mm, 0.3f);
+            // ✅ 수정: 데드밴드 확대 (1.5mm → 3.0mm)
+            roll_height_mm  = apply_deadband(roll_height_mm,  3.0f);
+            pitch_height_mm = apply_deadband(pitch_height_mm, 3.0f);
+
+            // ✅ 수정: 미세 각도 완전 무시 (0.8도 → 2.0도)
+            if (fabsf(roll_for_level) < 0.2f) roll_height_mm = 0.0f;
+            if (fabsf(pitch_for_level) < 0.2f) pitch_height_mm = 0.0f;
 
             compute_leveling_pid(&pid_roll,  LEVELING_SIGN_ROLL  * roll_height_mm,  dt, slope_state);
             compute_leveling_pid(&pid_pitch, LEVELING_SIGN_PITCH * pitch_height_mm, dt, slope_state);
-            
+                        
             float roll_ctrl_mm  = pid_roll.output  * boost * leveling_gain_scale * osc_damping;
             float pitch_ctrl_mm = pid_pitch.output * boost * leveling_gain_scale * osc_damping;
 
             float roll_ctrl_deg  = height_to_servo_deg(roll_ctrl_mm,  MAX_CORRECTION_DEG);
             float pitch_ctrl_deg = height_to_servo_deg(pitch_ctrl_mm, MAX_CORRECTION_DEG);
 
-            /* =========================================================
-            * ✅ 방지턱/충격 구간: roll만 약화해서 좌우 춤 억제
-            * (pitch는 유지해야 방지턱에서 자연스럽게 복귀함)
-            * ========================================================= */
-            if (!slope_state && bump_mode) {
-                roll_ctrl_deg *= 0.25f;
-                pid_roll.integral *= 0.7f;
-            }
             float max_deg = MAX_CORRECTION_DEG * range_limit;
 
             /* clamp 전 값 백업 */
@@ -1638,7 +1487,7 @@ void IMU_Suspension_Task(void *pArg)
             awu_backcalc(&pid_roll,  roll_cmd_deg_unc,  max_deg, dt);
             awu_backcalc(&pid_pitch, pitch_cmd_deg_unc, max_deg, dt);
 
-            // ✅ STM32 방식: 각 바퀴 = 중립 + Roll보정 + Pitch보정
+// ✅ STM32 방식: 각 바퀴 = 중립 + Roll보정 + Pitch보정
             // Roll/Pitch 제어량은 이미 계산됨 (roll_ctrl_deg, pitch_ctrl_deg)
 
             // ✅ 레벨링 = Roll보정 + Pitch보정 (중립점은 나중에 height로 추가)
@@ -1680,89 +1529,19 @@ void IMU_Suspension_Task(void *pArg)
         }
         #endif
 
-        // ========== 8. 독립 댐핑 ==========
-        float wheel_damping[4] = {0, 0, 0, 0};
-        
-
-        /* ✅ 접지 우선: 단일휠 bump 동안 다른 휠의 leveling을 잠깐 끊기 */
-        if (!slope_state && (bump_wheel >= 0)) {
-            for (uint8 i = 0; i < 4; i++) {
-                if (i != (uint8)bump_wheel) {
-                    leveling[i] *= 0.0f;   // 완전 차단
-                    // leveling[i] *= 0.3f; // (대안) 완전 차단이 거칠면 0.2~0.4
-                }
-            }
-        }
-
-        float damping_kp, damping_kd, max_damping;
-        if (current_speed < SPEED_THRESHOLD_LOW) {
-            damping_kp = DAMPING_KP_SOFT;
-            damping_kd = DAMPING_KD_SOFT;
-            max_damping = 8.0f;
-        } else if (current_speed < SPEED_THRESHOLD_HIGH) {
-            damping_kp = DAMPING_KP_MEDIUM;
-            damping_kd = DAMPING_KD_MEDIUM;
-            max_damping = 10.0f;
-        } else {
-            damping_kp = DAMPING_KP_HARD;
-            damping_kd = DAMPING_KD_HARD;
-            max_damping = 12.0f;
-        }
-
-        for (uint8 i = 0; i < 4; i++) {
-
-        if (now_ms < inhibit_until_ms[i]) {
-        /* 다른 휠은 잠깐 댐핑 멈춤 */
-        PID_Damping_Reset(&pid_damping_wheel[i]);
-        wheel_vel_z[i] *= 0.5f;   // 남은 출렁 속도 빨리 죽이기
-        wheel_damping[i] = 0.0f;
-        continue;
-        }
-        
-        pid_damping_wheel[i].Kp = damping_kp;
-        pid_damping_wheel[i].Kd = damping_kd;
-
-        /* wheel_lp_z[i]는 위에서 이미 LPF로 업데이트됨
-        wheel_hp_acc = (가속도 - LPF) = 진동/충격 성분 */
-        float wheel_hp_acc = wheel_accel_z[i] - wheel_lp_z[i];     // m/s2
-
-        /* ✅ 리키 적분으로 속도 추정 (드리프트 방지) */
-        wheel_vel_z[i] = wheel_vel_z[i] * DAMP_VEL_LEAK + wheel_hp_acc * dt; // m/s
-        wheel_vel_z[i] = clamp(wheel_vel_z[i], -DAMP_VEL_LIMIT_MS, DAMP_VEL_LIMIT_MS);
-
-        /* ✅ 목표: 속도 0 (출렁임 속도 제거)
-        measurement는 "속도"로 넣는다 (g가 아니라 m/s 권장)
-        단, 기존 PID_Damping_Update는 단위 상관없이 동작하니 그대로 사용 가능 */
-        wheel_damping[i] = PID_Damping_Update(&pid_damping_wheel[i], 0.0f, wheel_vel_z[i]);
-
-        /* 출력 제한 */
-        float max_damp = max_damping * range_limit;
-        wheel_damping[i] = clamp(wheel_damping[i], -max_damp, max_damp);
-        }
 
         // ========== 9. 통합 제어 + deg/sec 기반 속도 제한 추종 ==========
-        // ✅ height 읽기 (전체 차고 조정) - 한 번만 선언!
         SAL_CoreCriticalEnter();
         float height = g_HeightData.height_offset;
         SAL_CoreCriticalExit();
 
         float target_deg[4];
 
-        // 9-1) raw target 만들기
-        // ✅ 각 바퀴 독립 제어 (STM32 방식)
+        // ✅ 최종 목표 = 차고 + 레벨링 + 충격상쇄
         for (uint8 i = 0; i < 4; i++) {
-            // 1. 댐핑 (바퀴별 진동 억제)
-            float damp_deg = wheel_damping[i] * DAMPING_VEL_TO_DEG;
+            float raw_target = height + leveling[i] + shock_absorb[i];
             
-            // 2. 프리킥 (충격 선제 대응)
-            float kick_deg = adxl_pre_kick[i];
-            
-            // 3. 최종 목표 = 차고(height) + 레벨링 + 댐핑 + 프리킥
-            //    ⭐ height가 중립점 역할을 함
-            float raw_target = height + leveling[i] + damp_deg + kick_deg;
-            
-            // 4. 범위 제한
-            float max_offset = SERVO_CMD_DEG_LIMIT  * range_limit;
+            float max_offset = SERVO_CMD_DEG_LIMIT * range_limit;
             raw_target = clamp(raw_target, -max_offset, max_offset);
             target_deg[i] = raw_target;
         }
@@ -1778,7 +1557,6 @@ void IMU_Suspension_Task(void *pArg)
             float rate_max = SERVO_RATE_FLAT_FAST;
             rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
         }
-        rate_deg_s *= g_DriveModeRateScale[(uint8)DriveMode_Get()];
 
         float dt_s = (float)IMU_SUSP_PERIOD_MS / 1000.0f;
         float max_step = rate_deg_s * dt_s;   // ✅ 여기서 먼저 계산!
@@ -1798,7 +1576,7 @@ void IMU_Suspension_Task(void *pArg)
         }
 
 
-        /* ===== Debug snapshot (minimal overhead) ===== */
+ /* ===== Debug snapshot (minimal overhead) ===== */
         SAL_CoreCriticalEnter();
         g_SuspDbg.leveling[0] = leveling[0];
         g_SuspDbg.leveling[1] = leveling[1];
@@ -1807,7 +1585,6 @@ void IMU_Suspension_Task(void *pArg)
 
         g_SuspDbg.pid_roll_out_mm  = pid_roll.output;
         g_SuspDbg.pid_pitch_out_mm = pid_pitch.output;
-
 
         g_SuspDbg.pid_roll_integral  = pid_roll.integral;
         g_SuspDbg.pid_pitch_integral = pid_pitch.integral;
@@ -1823,9 +1600,8 @@ void IMU_Suspension_Task(void *pArg)
         g_SuspDbg.gyro_z_dps = imuRaw.gyro_z;
 
         for (uint8 i = 0; i < 4; i++) {
-            g_SuspDbg.pre_kick_deg[i] = adxl_pre_kick[i];
-            g_SuspDbg.damp_out[i]     = wheel_damping[i] * DAMPING_VEL_TO_DEG; // ✅ deg로 저장
-            g_SuspDbg.target_deg[i]   = target_deg[i]; // raw target (rate-limit 전)
+            g_SuspDbg.shock_absorb[i] = shock_absorb[i];  // ✅ 수정
+            g_SuspDbg.target_deg[i]   = target_deg[i];
         }
         SAL_CoreCriticalExit();
 
@@ -2078,24 +1854,14 @@ void Monitoring_Task(void *pArg)
             mcu_printf("\n");
         }
 
-        mcu_printf("[DBG] pre_kick(deg) FL:");
-        Print_Float_Value(dbg.pre_kick_deg[WHEEL_FL], 100);
+        mcu_printf("[DBG] shock_abs(deg) FL:");
+        Print_Float_Value(dbg.shock_absorb[WHEEL_FL], 100);
         mcu_printf(" FR:");
-        Print_Float_Value(dbg.pre_kick_deg[WHEEL_FR], 100);
+        Print_Float_Value(dbg.shock_absorb[WHEEL_FR], 100);
         mcu_printf(" RL:");
-        Print_Float_Value(dbg.pre_kick_deg[WHEEL_RL], 100);
+        Print_Float_Value(dbg.shock_absorb[WHEEL_RL], 100);
         mcu_printf(" RR:");
-        Print_Float_Value(dbg.pre_kick_deg[WHEEL_RR], 100);
-        mcu_printf("\n");
-
-        mcu_printf("[DBG] damp(deg)    FL:");
-        Print_Float_Value(dbg.damp_out[WHEEL_FL], 100);
-        mcu_printf(" FR:");
-        Print_Float_Value(dbg.damp_out[WHEEL_FR], 100);
-        mcu_printf(" RL:");
-        Print_Float_Value(dbg.damp_out[WHEEL_RL], 100);
-        mcu_printf(" RR:");
-        Print_Float_Value(dbg.damp_out[WHEEL_RR], 100);
+        Print_Float_Value(dbg.shock_absorb[WHEEL_RR], 100);
         mcu_printf("\n");
 
         mcu_printf("[DBG] target(deg)  FL:");
@@ -2128,10 +1894,10 @@ static void ADXL345_Monitor_Task(void *pArg)
 
     uint32 start_tick;
 
-    /* 3초 캘리브(중립 유지 동안) = 300샘플 @100Hz */
-    const uint32 CAL_MS = 3000;
+    const uint32 CAL_MS = ADXL_CAL_MS;
     const uint32 PERIOD_MS = 10;
     const uint32 CAL_SAMPLES = (CAL_MS / PERIOD_MS);
+
 
     double sum_x[WHEEL_MAX] = {0}, sum_y[WHEEL_MAX] = {0}, sum_z[WHEEL_MAX] = {0};
     uint32 sample_cnt = 0;
@@ -2330,7 +2096,6 @@ static void AppTaskCreate(void)
 
 #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
     CAN_DemoCreateApp();
-    CAN_ControlInit(0U);  // Channel 0 모니터링
 #endif  // ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
 
 #if ( MCU_BSP_SUPPORT_APP_FW_UPDATE == 1 )
