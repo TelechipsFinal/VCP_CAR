@@ -128,7 +128,7 @@
 #define TRACK_WIDTH_MM          (233.0f)    // 좌우 바퀴 간격
 
 /* ===== 레벨링 PID 게인 (STM32 방식) ===== */
-#define LEVELING_GAIN           1.5f
+#define LEVELING_GAIN           2.5f
 #define INTEGRAL_GAIN           0.30f
 #define INTEGRAL_MAX            25.0f
 #define DERIVATIVE_GAIN         0.25f
@@ -151,15 +151,13 @@
  * 100Hz(10ms)에서 max_step = rate * 0.01
  * 예) 700deg/s -> 1주기 7deg 이동
  */
-#define SERVO_RATE_FLAT_FAST      300.0f   // 큰 기울기/급변에서의 추종 속도
-#define SERVO_RATE_SLOPE          300.0f   // 언덕에서(출렁 방지) 추종 속도
+#define SERVO_RATE_FLAT_FAST      800.0f   // 큰 기울기/급변에서의 추종 속도
+#define SERVO_RATE_SLOPE          600.0f   // 언덕에서(출렁 방지) 추종 속도
 
-/* ===== LPF 파라미터 ===== */
-#define MAX_TILT_ANGLE            70.0f
 
 /* ===== Small-tilt 안정화(핵심) ===== */
-#define SMALL_TILT_MIN      0.25f    // 이 아래는 거의 안 움직이게
-#define SMALL_TILT_MAX       2.5f    // 여기부터 정상 gain(1.0)
+#define SMALL_TILT_MIN      0.15f    // 이 아래는 거의 안 움직이게
+#define SMALL_TILT_MAX       1.0f    // 여기부터 정상 gain(1.0)
 
 #define LEVELING_SIGN_ROLL   (1.0f)
 #define LEVELING_SIGN_PITCH  (1.0f)
@@ -172,12 +170,11 @@
 #define ACC_SOFT_BAND           (3.0f)   // |mag-9.81| < 3.0면 "부분 신뢰"
 
 // ✅ 칼만 R_measure 범위 (작을수록 accel를 더 믿음)
-#define KALMAN_R_MIN            (0.10f)  // 기존 값
-#define KALMAN_R_MAX            (5.00f)  // 흔들릴 때 accel 거의 무시
+#define KALMAN_R_MIN            (2.00f)  // 기존 값
+#define KALMAN_R_MAX            (2.00f)  // 흔들릴 때 accel 거의 무시
 
 /* ===== 수평제어 OFF 테스트 모드 ===== */
 #define INDEPENDENT_WHEEL_TEST_MODE   (0)
-
 
 
 /* ===== Impact-based pre-kick tuning ===== */
@@ -187,7 +184,7 @@
 #define PREKICK_IMPACT_LPF       (0.60f)  // impact 필터 (0~1), 클수록 빠름
 
 // ✅ 추가: 내부 목표 각도 범위(너 코드가 실제로 쓰는 clamp 범위)
-#define SERVO_CMD_DEG_LIMIT   (35.0f)   // 지금 raw_target clamp에 맞춤
+#define SERVO_CMD_DEG_LIMIT   (70.0f)   // 지금 raw_target clamp에 맞춤
 
 
 #define IMPACT_THRESHOLD_G (0.8f)
@@ -235,7 +232,11 @@ static volatile uint32 g_lead_until_ms = 0;
   #define IMU_STAB_SAMPLES         (200U)
   #define ADXL_CAL_MS              (3000U)
 #endif
+///
 
+
+
+///
 
 
 /*
@@ -421,9 +422,9 @@ static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick
 static volatile DriveMode_t g_DriveMode = DRIVE_MODE_NORMAL;
 static volatile uint8 g_DriveModeAutoEnabled = 0U;
 static const float g_DriveModeHeightOffsetDeg[3] = {
-    10.0f,   /* COMFORT */
+    20.0f,   /* COMFORT */
     0.0f,    /* NORMAL */
-    -10.0f   /* SPORT */
+    -20.0f   /* SPORT */
 };
 static const float g_DriveModeRawTargetScale[3] = {
     1.2f,   /* COMFORT */
@@ -1680,9 +1681,18 @@ for (uint8 i = 0; i < 4; i++) {
 
         if (leveling_on) {
             float boost = 1.0f;
-            if (total_tilt > 12.0f) boost = 2.0f;
+            if (total_tilt > 12.0f) boost = 2.2f;
+            else if (total_tilt > 11.0f) boost = 2.1f;
+            else if (total_tilt > 10.0f) boost = 2.0f;
+            else if (total_tilt > 9.0f) boost = 1.9f;
+            else if (total_tilt > 8.0f) boost = 1.8f;
+            else if (total_tilt > 7.0f) boost = 1.7f;
             else if (total_tilt > 6.0f) boost = 1.6f;
+            else if (total_tilt > 5.0f) boost = 1.5f;
+            else if (total_tilt > 4.0f) boost = 1.4f;
             else if (total_tilt > 3.0f) boost = 1.3f;
+            else if (total_tilt > 2.0f) boost = 1.2f;
+            else if (total_tilt > 1.0f) boost = 1.1f;
 
             float leveling_gain_scale;
             if (slope_like) {
@@ -1798,9 +1808,15 @@ for (uint8 i = 0; i < 4; i++) {
         if (slope_like) {
             rate_deg_s = SERVO_RATE_SLOPE;
         } else {
-            float rate_min = 120.0f;
-            float rate_max = SERVO_RATE_FLAT_FAST;
-            rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
+            float rate_deg_s;
+            if (slope_like) {
+                rate_deg_s = SERVO_RATE_SLOPE;  // 600 deg/s
+            } else {
+                // soft_w에 따라 400~800 deg/s (기존 120~300에서 대폭 상향)
+                float rate_min = 400.0f;  // ✅ 120 → 400
+                float rate_max = SERVO_RATE_FLAT_FAST;  // 800
+                rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
+            }
         }
 
         float dt_s = (float)IMU_SUSP_PERIOD_MS / 1000.0f;
