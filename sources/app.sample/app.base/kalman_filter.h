@@ -6,8 +6,8 @@
 
 //temp
 #define KALMAN_Q_ANGLE    0.003f    // 작으면 자이로 중심
-#define KALMAN_Q_BIAS     0.002f  // 드리프트 천천히 제거
-#define KALMAN_R_MEASURE  0.1f      // 작으면 가속도계 중심
+#define KALMAN_Q_BIAS     0.04f  // 드리프트 천천히 제거
+#define KALMAN_R_MEASURE  2.0f      // 작으면 가속도계 중심
 
 
 typedef struct {

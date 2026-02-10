@@ -17,6 +17,8 @@
 
 #if ( MCU_BSP_SUPPORT_APP_BASE == 1 )
 
+#define DAMPING_ENABLE   (0)   // 1: ADXL damping 사용, 0: 완전 비활성화
+
 #include <main.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,9 +34,12 @@
 #include <kalman_filter.h>
 #include <printf_float.h>
 #include <imu_calibration.h>
+#if (DAMPING_ENABLE == 1)
 #include <ADXL345_test.h>
 #include <ADXL345.h>
 #include <i2c.h>
+#endif
+
 #include "ISO2631-1.h"
 
 
@@ -173,6 +178,8 @@
 /* ===== 수평제어 OFF 테스트 모드 ===== */
 #define INDEPENDENT_WHEEL_TEST_MODE   (0)
 
+
+
 /* ===== Impact-based pre-kick tuning ===== */
 #define PREKICK_GAIN_BASE        (2.0f)   // 기본 1.0
 #define PREKICK_GAIN_MAX_ADD     (1.5f)   // impact=1일 때 추가 배수 (총 3.5배)
@@ -210,9 +217,6 @@
 #define SLOPE_ANGLE_THRESHOLD   6.0f
 #define SLOPE_VARIANCE_MAX      1.5f
 #define SLOPE_WARMUP_SAMPLES    200
-
-/* ===== 서보 중립 위치 ===== */
-#define SERVO_NEUTRAL_DEG       0.0f    // 서보 중립 각도 (deg)
 
 static volatile uint8  g_lead_axle = 0;   // 0:none, 1:front, 2:rear
 static volatile uint32 g_lead_until_ms = 0;
@@ -343,12 +347,11 @@ static volatile uint8 g_IMU_SUSP_INIT_DONE = 0;
 /* ✅ 시스템 준비 플래그: 0=준비중(캘리브/안정화), 1=모니터링/제어 시작 */
 static volatile uint8 g_SYSTEM_READY = 0;
 
-/* ✅ ADXL bias (캘리브레이션으로 구한 평균값) */
+#if (DAMPING_ENABLE == 1)
+
 static float g_ADXL_bias_x[4] = {0};
 static float g_ADXL_bias_y[4] = {0};
 static float g_ADXL_bias_z[4] = {0};
-
-/* ✅ ADXL 캘리브 완료 플래그 */
 static volatile uint8 g_ADXL_CAL_DONE = 0;
 
 typedef struct {
@@ -360,6 +363,9 @@ typedef struct {
 } ADXL_Data_t;
 
 static ADXL_Data_t g_ADXLData;
+
+#endif
+
 
 typedef struct {
     float leveling[4];
@@ -400,7 +406,11 @@ static const char *g_wheel_name[WHEEL_MAX] = { "FL", "FR", "RL", "RR" };
  * 네 테스트 기준(예시): dev0=RL, dev1=FL, dev2=RR, dev3=FR
  * (너가 실제로 쓰는 매핑이 이거 맞으면 그대로)
  */
+
+ #if (DAMPING_ENABLE == 1)
 static const uint8 g_ADXL_DEV_TO_WHEEL[ADXL_COUNT] = { WHEEL_RL, WHEEL_FL, WHEEL_RR, WHEEL_FR };
+#endif
+
 
 static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick(ms)
 /*
@@ -736,7 +746,10 @@ void cmain (void)
     memset(&g_MotorData, 0, sizeof(g_MotorData));
     memset(&g_ServoData, 0, sizeof(g_ServoData));
     memset(&g_HeightData, 0, sizeof(g_HeightData));
+#if (DAMPING_ENABLE == 1)
     memset(&g_ADXLData, 0, sizeof(g_ADXLData));
+#endif
+
     memset(&gDriveCmd, 0, sizeof(gDriveCmd));
 
     g_CANData.suspension_enable = 1;
@@ -819,10 +832,16 @@ void Main_StartTask(void * pArg)
         mcu_printf("[ERROR] IMU Init Failed\n");
         }
 
-    // ✅ I2C 초기화 (I2C2 CH_0)
+#if (DAMPING_ENABLE == 1)
     if(ADXL345_Test_Init() == SAL_RET_SUCCESS) {
         mcu_printf("[SYSTEM] ADXL345 I2C Initialized\n");
+    } else {
+        mcu_printf("[WARN] ADXL345 I2C Init Failed\n");
     }
+#else
+    mcu_printf("[SYSTEM] Damping disabled -> skip ADXL/I2C init\n");
+#endif
+
         mcu_printf("[SYSTEM] Creating Control Tasks...\n\n");
 
     #if ( MCU_BSP_SUPPORT_CAN_DEMO == 1 )
@@ -1107,29 +1126,29 @@ void IMU_Suspension_Task(void *pArg)
     const uint32 IMU_CAL_SAMPLES = (IMU_CAL_MS / IMU_SUSP_PERIOD_MS);
     const uint32 STABILIZATION_SAMPLES = IMU_STAB_SAMPLES;
     
-    // ========== ADXL 캘리브 변수 ==========
+#if (DAMPING_ENABLE == 1)
     double adxl_sum_x[4] = {0}, adxl_sum_y[4] = {0}, adxl_sum_z[4] = {0};
     static uint8 adxl_calibration_done = 0;
     uint32 adxl_calib_samples = 0;
     const uint32 ADXL_CAL_SAMPLES = (ADXL_CAL_MS / IMU_SUSP_PERIOD_MS);
-    
-    // ========== 서보 ==========
+
+    static float wheel_lp_z[4] = {0};
+    static float adxl_prev_mag[4] = {0};
+    static uint32 adxl_last_hit_ms[4] = {0};f
+    static float adxl_impact_hold[4] = {0};
+#endif
+
+        // ========== 서보 ==========
     uint32 servo_pulse_ns[4] = {
         SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS,
         SERVO_NEUTRAL_PULSE_NS, SERVO_NEUTRAL_PULSE_NS
     };
-    
-    // ========== 제어 변수 ==========
-    static float wheel_lp_z[4] = {0};
+ 
     static float shock_absorb[4] = {0};
     static float impact_filt[4] = {0};
     static float servo_current_deg[4] = {0, 0, 0, 0};
     
-    // ========== ADXL impact 감지용 ==========
-    static float adxl_prev_mag[4] = {0};
-    static uint32 adxl_last_hit_ms[4] = {0};
-    static float adxl_impact_hold[4] = {0};
-    
+ 
     // ========== 경사 감지 ==========
     static float avg_roll = 0.0f;
     static float avg_pitch = 0.0f;
@@ -1143,6 +1162,8 @@ void IMU_Suspension_Task(void *pArg)
     mcu_printf("  - Servo follow: deg/sec rate limiting\n\n");
     
    // ========== ADXL 센서 초기화 (테스트 코드 방식) ==========
+
+   #if (DAMPING_ENABLE == 1)
     mcu_printf("[ADXL] Initializing sensors (verified writes)...\n");
     
     for (uint8 dev = 0; dev < ADXL_COUNT; dev++) {
@@ -1202,14 +1223,18 @@ void IMU_Suspension_Task(void *pArg)
     }
     
     mcu_printf("[ADXL] Sensors configured\n\n");
-    
-    for (uint8 i = 0; i < 4; i++) {
-        servo_current_deg[i] = 0.0f;
-        adxl_prev_mag[i] = 0.0f;
-        adxl_last_hit_ms[i] = 0;
-        adxl_impact_hold[i] = 0.0f;
-    }
 
+    #else
+    mcu_printf("[ADXL] Damping disabled (compile-time)\n\n");
+#endif
+    
+#if (DAMPING_ENABLE == 1)
+for (uint8 i = 0; i < 4; i++) {
+    adxl_prev_mag[i] = 0.0f;
+    adxl_last_hit_ms[i] = 0;
+    adxl_impact_hold[i] = 0.0f;
+}
+#endif
     SAL_CoreCriticalEnter();
     for (uint8 i = 0; i < 4; i++) {
         g_ServoData.position[i] = (float)NS_TO_US(servo_pulse_ns[i]);
@@ -1292,6 +1317,7 @@ void IMU_Suspension_Task(void *pArg)
         }
 
         /* ===== Phase 2: ADXL 캘리브 ===== */
+        #if (DAMPING_ENABLE == 1)
         if (!adxl_calibration_done) {
             for (uint8 i = 0; i < 4; i++) {
                 servo_pulse_ns[i] = SERVO_NEUTRAL_PULSE_NS;
@@ -1354,6 +1380,7 @@ void IMU_Suspension_Task(void *pArg)
             continue;
         }
 
+        #endif
         // ========== 3. Kalman 필터링 ==========
         imu_sample_count++;
         
@@ -1433,7 +1460,7 @@ void IMU_Suspension_Task(void *pArg)
         }
 
         // ========== 4. ADXL 읽기 (2개씩 교대) ==========
-        
+        #if (DAMPING_ENABLE == 1)
         static uint8 adxl_batch = 0;  // 0 or 1
         
         uint32 now_ms;
@@ -1505,6 +1532,11 @@ void IMU_Suspension_Task(void *pArg)
         // ✅ 다음 주기에는 다른 배치
         adxl_batch = 1 - adxl_batch;  // 0 ↔ 1 토글
 
+        #else
+    // ADXL 비활성화 시에도 아래 damping 계산에서 wheel_accel_z를 쓰면 안 됨
+    // (너는 shock_absorb를 #else에서 0으로 만들고 있으니, wheel_accel_z 자체를 없애도 됨)
+    #endif
+
         // ========== 5. 경사 감지 ==========
         
         const float alpha_slope = SLOPE_ALPHA;
@@ -1536,6 +1568,7 @@ void IMU_Suspension_Task(void *pArg)
         else if (total_tilt >= SMALL_TILT_MAX) soft_w = 1.0f;
         else soft_w = (total_tilt - SMALL_TILT_MIN) / (SMALL_TILT_MAX - SMALL_TILT_MIN);
 
+        #if (DAMPING_ENABLE == 1)
         // ========== 7. ADXL 댐핑 (HPF 기반) ==========
         
         float tau   = 1.0f / (2.0f * M_PI * LPF_CUTOFF_FREQ);
@@ -1623,6 +1656,11 @@ void IMU_Suspension_Task(void *pArg)
             }
             shock_absorb[i] = clamp(shock_absorb[i], -30.0f, 30.0f);
         }
+        #else
+        for (uint8 i = 0; i < 4; i++) {
+            shock_absorb[i] = 0.0f;
+        }
+        #endif
 
         // ========== 8. 레벨링 PID ==========
         
@@ -1894,6 +1932,7 @@ void Monitoring_Task(void *pArg)
         pitch    = g_IMUData.pitch;
         speed    = g_MotorData.current_speed;
 
+        #if (DAMPING_ENABLE == 1)
         for (uint8 i = 0; i < WHEEL_MAX; i++) {
             wheel_z[i] = g_ADXLData.accel_z[i];
             ax[i]      = g_ADXLData.accel_x[i];
@@ -1903,6 +1942,7 @@ void Monitoring_Task(void *pArg)
         }
 
         adxl_t = g_ADXLData.last_update_time;
+        #endif
         dbg = g_SuspDbg;
         SAL_CoreCriticalExit();
 
@@ -1953,6 +1993,7 @@ void Monitoring_Task(void *pArg)
         Print_Float_Value(pitch, 10);
         mcu_printf("\n");
 
+        #if (DAMPING_ENABLE == 1)
         mcu_printf("[ADXL] FL: ");
         Print_Float_Value(wheel_z[WHEEL_FL], 100);
         mcu_printf(" FR: ");
@@ -1962,6 +2003,9 @@ void Monitoring_Task(void *pArg)
         mcu_printf(" RR: ");
         Print_Float_Value(wheel_z[WHEEL_RR], 100);
         mcu_printf(" m/s2\n");
+        #else
+        mcu_printf("[ADXL] disabled\n");
+        #endif
 
         mcu_printf("[SERVO] FL: ");
         Print_Float_Value(servo[WHEEL_FL], 10);
@@ -2162,7 +2206,7 @@ static void ISO2631_Task(void *pArg)
         SAL_CoreCriticalEnter();
         roll = g_IMUData.roll;
         pitch = g_IMUData.pitch;
-        az = g_IMUData.accel_z;  // ✅ 이미 m/s² 단위
+        az = g_IMUData.accel_z * 9.80665;  // ✅ m/s² 단위
         SAL_CoreCriticalExit();
 
         SAL_GetTickCount(&now_ms);
