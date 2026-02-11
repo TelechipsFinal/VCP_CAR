@@ -157,7 +157,7 @@
 
 
 /* ===== Small-tilt 안정화(핵심) ===== */
-#define SMALL_TILT_MIN      0.05f    // 이 아래는 거의 안 움직이게
+#define SMALL_TILT_MIN      0.05f    // 이 아래는 거의 안 움직이게 
 #define SMALL_TILT_MAX       0.3f    // 여기부터 정상 gain(1.0)
 
 #define LEVELING_SIGN_ROLL   (1.0f)
@@ -242,7 +242,7 @@ static volatile uint32 g_lead_until_ms = 0;
 #define ICM_BUMP_Z_LOW_THR_MS2     (4.0f)    // ✅ 2m/s^2 이하
 #define ICM_BUMP_Z_HIGH_THR_MS2    (14.0f)   // ✅ 15m/s^2 이상
 #define ICM_BUMP_COOLDOWN_MS      (250U)    // 연속 감지 방지
-#define ICM_BUMP_DECAY            (0.95f)   // hold 감쇠 (0~1)
+#define ICM_BUMP_DECAY            (0.5f)   // hold 감쇠 (0~1)
 #define ICM_BUMP_MAX_DEG          (45.0f)   // 최대 댐핑 각도(튜닝)
 #define ICM_BUMP_MIN_DEG          (35.0f)    // 최소 댐핑 각도(튜닝)
 
@@ -931,16 +931,16 @@ void Main_StartTask(void * pArg)
     }
     
     // Task 5: Monitoring (10Hz)
-    // err = SAL_TaskCreate(&gMonitorTaskID,
-    //                     (const uint8 *)"Monitoring",
-    //                     (SALTaskFunc)&Monitoring_Task,
-    //                     &gMonitorTaskStk[0],
-    //                     MONITOR_TASK_STK_SIZE,
-    //                     MONITOR_TASK_PRIO,
-    //                     NULL);
-    // if(err == SAL_RET_SUCCESS) {
-    //     mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
-    // }
+    err = SAL_TaskCreate(&gMonitorTaskID,
+                        (const uint8 *)"Monitoring",
+                        (SALTaskFunc)&Monitoring_Task,
+                        &gMonitorTaskStk[0],
+                        MONITOR_TASK_STK_SIZE,
+                        MONITOR_TASK_PRIO,
+                        NULL);
+    if(err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] Monitor Task Created (Priority: %d, 10Hz)\n\n", MONITOR_TASK_PRIO);
+    }
 
     // Task X: ISO2631 (100Hz)
     // err = SAL_TaskCreate(&gISOTaskID,
@@ -1038,7 +1038,7 @@ static void Steering_Control_Task(void *pArg)
 
     mcu_printf("[STEER] Task Started\n");
 
-    
+
     while(1) {
         uint8 steer;
         uint8 valid;
