@@ -242,7 +242,7 @@ static volatile uint32 g_lead_until_ms = 0;
 #define ICM_BUMP_Z_LOW_THR_MS2     (4.0f)    // ✅ 2m/s^2 이하
 #define ICM_BUMP_Z_HIGH_THR_MS2    (14.0f)   // ✅ 15m/s^2 이상
 #define ICM_BUMP_COOLDOWN_MS      (250U)    // 연속 감지 방지
-#define ICM_BUMP_DECAY            (0.95f)   // hold 감쇠 (0~1)
+#define ICM_BUMP_DECAY            (0.5f)   // hold 감쇠 (0~1)
 #define ICM_BUMP_MAX_DEG          (45.0f)   // 최대 댐핑 각도(튜닝)
 #define ICM_BUMP_MIN_DEG          (35.0f)    // 최소 댐핑 각도(튜닝)
 
