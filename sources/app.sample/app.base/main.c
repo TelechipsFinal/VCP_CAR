@@ -250,23 +250,6 @@ static volatile uint32 g_lead_until_ms = 0;
     static float  icm_bump_hold = 0.0f;   // 0~1
     static uint32 icm_last_bump_ms = 0;
 
-#define MOTOR_TEST_MODE        (1)   // ✅ 1이면 테스트 테스크가 모터를 직접 구동
-
-#define MOTOR_TEST_TASK_PRIO   (SAL_PRIO_APP_CFG + 8)
-#define MOTOR_TEST_TASK_STK_SIZE (128)   // 512B면 충분
-
-/* 테스트 시나리오 */
-#define MOTOR_TEST_START_DELAY_MS   (3000U)  // init+calib 시작 후 3초
-#define MOTOR_TEST_RUN_MS           (7000U)  // 7초 주행
-#define MOTOR_TEST_SPEED_CMD        (800U)   // 모터 속도 800
-
-/* ================================
- * 2) Global 변수(Task ID/Stack) 추가
- * ================================ */
-static uint32 gMotorTestTaskID = 0;
-static uint32 gMotorTestTaskStk[MOTOR_TEST_TASK_STK_SIZE];
-
-static void Motor_Test_Task(void *pArg);
 ///
 
 
@@ -549,8 +532,6 @@ static void ISO2631_Task(void *pArg);
 
 static void Motor_SetSpeed(float speed);
 static void AppTaskCreate(void);
-static void DisplayAliveLog(void);
-static void DisplayOTPInfo(void);
 
 
 /*
@@ -777,8 +758,6 @@ void cmain (void)
            versionInfo.viMajorVersion,
            versionInfo.viMinorVersion,
            versionInfo.viPatchVersion);
-    mcu_printf("-------------------------------\n");
-    DisplayOTPInfo();
     mcu_printf("===============================\n\n");
 
     // Initialize global data
@@ -978,22 +957,6 @@ void Main_StartTask(void * pArg)
     //     mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
     // }
 
-    #if MOTOR_TEST_MODE
-    err = SAL_TaskCreate(&gMotorTestTaskID,
-                        (const uint8 *)"Motor_Test",
-                        (SALTaskFunc)&Motor_Test_Task,
-                        &gMotorTestTaskStk[0],
-                        MOTOR_TEST_TASK_STK_SIZE,
-                        MOTOR_TEST_TASK_PRIO,
-                        NULL);
-    if (err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] Motor Test Task Created (Priority: %d)\n", MOTOR_TEST_TASK_PRIO);
-    } else {
-        mcu_printf("[ERROR] Failed to Create Motor Test Task\n");
-    }
-    #endif
-
-
     mcu_printf("[SYSTEM] System Initialization Sequence Finished!\n"); 
     mcu_printf("=========================================\n\n");
 
@@ -1037,12 +1000,6 @@ static void Speed_Control_Task(void *pArg)
 
     while(1) {
 
-        #if MOTOR_TEST_MODE
-        /* ✅ 테스트 모드에서는 CAN 기반 속도명령 무시 */
-        SAL_TaskSleep(10);
-        continue;
-        #endif
-
         uint32 speed;
         uint8 valid;
 
@@ -1081,6 +1038,7 @@ static void Steering_Control_Task(void *pArg)
 
     mcu_printf("[STEER] Task Started\n");
 
+    
     while(1) {
         uint8 steer;
         uint8 valid;
@@ -2438,62 +2396,6 @@ static void ISO2631_Task(void *pArg)
 }
 
 
-static void Motor_Test_Task(void *pArg)
-{
-    (void)pArg;
-
-    mcu_printf("[MOTOR_TEST] Task Started\n");
-
-    /* 1) init + calib 시퀀스가 '시작'되었는지 대기
-       - 너 코드에서 g_IMU_SUSP_INIT_DONE=1은 IMU task가 캘리브 들어가기 전 set됨 */
-    while (1) {
-        uint8 inited;
-        SAL_CoreCriticalEnter();
-        inited = g_IMU_SUSP_INIT_DONE;
-        SAL_CoreCriticalExit();
-
-        if (inited != 0U) break;
-        SAL_TaskSleep(10);
-    }
-
-    mcu_printf("[MOTOR_TEST] IMU init/calib sequence started -> wait %d ms\n",
-               (int)MOTOR_TEST_START_DELAY_MS);
-    SAL_TaskSleep(MOTOR_TEST_START_DELAY_MS);
-
-#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
-    mcu_printf("[MOTOR_TEST] GO speed=%d for %d ms\n",
-               (int)MOTOR_TEST_SPEED_CMD, (int)MOTOR_TEST_RUN_MS);
-
-    MotorControl_SetSpeed((uint32)MOTOR_TEST_SPEED_CMD);
-
-    /* 혹시 다른 경로가 건드릴까봐 100ms마다 한번 더 유지(안전) */
-    uint32 t0 = 0, now = 0;
-    SAL_GetTickCount(&t0);
-    while (1) {
-        SAL_GetTickCount(&now);
-        if ((now - t0) >= MOTOR_TEST_RUN_MS) break;
-        MotorControl_SetSpeed((uint32)MOTOR_TEST_SPEED_CMD);
-        SAL_TaskSleep(100);
-    }
-
-    MotorControl_SetSpeed(0U);
-    mcu_printf("[MOTOR_TEST] STOP\n");
-
-    /* 상태 스냅샷(선택) */
-    SAL_CoreCriticalEnter();
-    gDriveLastSpeed = 0U;
-    SAL_CoreCriticalExit();
-
-#else
-    mcu_printf("[MOTOR_TEST] MCU_BSP_SUPPORT_MOTOR_PDM=0 -> motor control not available\n");
-#endif
-
-    /* 1회 실행 후 idle */
-    while (1) {
-        SAL_TaskSleep(1000);
-    }
-}
-
 
 
 static void AppTaskCreate(void)
@@ -2534,101 +2436,5 @@ static void AppTaskCreate(void)
 
 }
 
-static void DisplayAliveLog(void)
-{
-    if (gALiveMsgOnOff != 0U)
-    {
-        mcu_printf("\n %d", gALiveCount);
-
-        gALiveCount++;
-
-        if(gALiveCount >= MAIN_UINT_MAX_NUM)
-        {
-            gALiveCount = 0;
-        }
-    }
-    else
-    {
-        gALiveCount = 0;
-    }
-}
-
-#define LDT1_AREA_ADDR  0xA1011800U
-#define PMU_REG_ADDR    0xA0F28000U
-
-static void DisplayOTPInfo(void)
-{
-    volatile uint32 *ldt1Addr;
-    volatile uint32 *chipNameAddr;
-    volatile uint32 *remapAddr;
-    volatile uint32 *hsmStatusAddr;
-    uint32          chipName = 0;
-    uint32          dualBankVal = 0;
-    uint32          dual_bank = 0;
-    uint32          expandFlashVal = 0;
-    uint32          expand_flash = 0;
-    uint32          remap_mode = 0;
-    uint32          hsm_ready = 0;
-
-    //----------------------------------------------------------------
-    // OTP LDT1 Read
-    // [11:0]Dual_Bank_Selection, [59:48]EXPAND_FLASH
-    // Dual_Bank_Sel: [0xC0][11: 0] & [0xD0][11: 0] & [0xE0][11: 0] & [0xF0][11: 0]
-    // EXPAND_FLASH : [0xC4][27:16] & [0xD4][27:16] & [0xE4][27:16] & [0xF4][27:16]
-    // HwMC_PRG_FLS_LDT1: 0xA1011800
-
-    ldt1Addr = (volatile uint32 *)(LDT1_AREA_ADDR + 0x00C0);
-    chipNameAddr = (volatile uint32 *)(LDT1_AREA_ADDR + 0x0300);
-    remapAddr = (volatile uint32 *)(PMU_REG_ADDR);
-    hsmStatusAddr = (volatile uint32 *)(PMU_REG_ADDR + 0x0020);
-
-    chipName = *chipNameAddr;
-    chipName &= 0x000FFFFF;
-
-    dualBankVal = ldt1Addr[ 0];
-    expandFlashVal = ldt1Addr[ 1];
-
-    dualBankVal &= ldt1Addr[ 4];
-    expandFlashVal &= ldt1Addr[ 5];
-
-    dualBankVal &= ldt1Addr[ 8];
-    expandFlashVal &= ldt1Addr[ 9];
-
-    dualBankVal &= ldt1Addr[12];
-    expandFlashVal &= ldt1Addr[13];
-
-    dualBankVal = (dualBankVal >> 0) & 0x0FFF;
-    expandFlashVal  = (expandFlashVal >> 16) & 0x0FFF;
-
-    dual_bank = (dualBankVal == 0x0FFF) ? 0 : 1;            // (single_bank : dual_bank)
-    expand_flash  = (expandFlashVal  == 0x0000) ? 0 : 1;    // (only_eFlash : use_extSNOR)
-
-    remap_mode = remapAddr[ 0];
-
-    mcu_printf("    CHIP   NAME  : %x\n",    chipName);
-    mcu_printf("    DUAL   BANK  : %d\n",    dual_bank);
-    mcu_printf("    EXPAND FLASH : %d\n",    expand_flash);
-    mcu_printf("    REMAP  MODE  : %d\n",    (remap_mode >> 16));
-
-    hsm_ready = hsmStatusAddr[ 0];
-    hsm_ready = (hsm_ready >> 2) & 0x0001;
-#if 0
-    if(hsm_ready)
-    {
-        mcu_printf("    HSM    READY : %d\n",    hsm_ready);
-    }
-    else
-    {
-        while(hsm_ready != 1)
-        {
-            mcu_printf("    HSM    READY : %d\n",    hsm_ready);
-            mcu_printf("    wait...\n");
-            hsm_ready = (hsm_ready >> 2) & 0x0001;
-        }
-    }
-#else
-    mcu_printf("    HSM    READY : %d\n",    hsm_ready);
-#endif
-}
 
 #endif  // ( MCU_BSP_SUPPORT_APP_BASE == 1 )
