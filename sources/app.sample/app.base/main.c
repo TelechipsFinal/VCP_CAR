@@ -133,7 +133,7 @@
 #define INTEGRAL_MAX            25.0f
 #define DERIVATIVE_GAIN         0.25f
 #define DERIVATIVE_FILTER       0.7f
-#define DEADBAND                0.5f
+#define DEADBAND                0.2f
 
 /* ===== 속도 임계값 ===== */
 #define SPEED_THRESHOLD_LOW     30.0f
@@ -151,13 +151,14 @@
  * 100Hz(10ms)에서 max_step = rate * 0.01
  * 예) 700deg/s -> 1주기 7deg 이동
  */
-#define SERVO_RATE_FLAT_FAST      800.0f   // 큰 기울기/급변에서의 추종 속도
+
+#define SERVO_RATE_FLAT_FAST      1000.0f   // 큰 기울기/급변에서의 추종 속도
 #define SERVO_RATE_SLOPE          600.0f   // 언덕에서(출렁 방지) 추종 속도
 
 
 /* ===== Small-tilt 안정화(핵심) ===== */
-#define SMALL_TILT_MIN      0.15f    // 이 아래는 거의 안 움직이게
-#define SMALL_TILT_MAX       1.0f    // 여기부터 정상 gain(1.0)
+#define SMALL_TILT_MIN      0.05f    // 이 아래는 거의 안 움직이게
+#define SMALL_TILT_MAX       0.3f    // 여기부터 정상 gain(1.0)
 
 #define LEVELING_SIGN_ROLL   (1.0f)
 #define LEVELING_SIGN_PITCH  (1.0f)
@@ -211,7 +212,7 @@
 
 // Define 추가 (Line 100)
 #define SLOPE_ALPHA             0.05f
-#define SLOPE_ANGLE_THRESHOLD   6.0f
+#define SLOPE_ANGLE_THRESHOLD   10.0f
 #define SLOPE_VARIANCE_MAX      1.5f
 #define SLOPE_WARMUP_SAMPLES    200
 
@@ -232,10 +233,40 @@ static volatile uint32 g_lead_until_ms = 0;
   #define IMU_STAB_SAMPLES         (200U)
   #define ADXL_CAL_MS              (3000U)
 #endif
+
+#define SLOPE_DISABLE_HOLD_MS     (3000U)  // 3초 이상 지속되면 leveling OFF
+#define SLOPE_ENABLE_HYST_MS      (500U)   // 평지로 돌아와도 0.5초는 OFF 유지(튀는거 방지)
+
 ///
+/* ===== ICM bump (Z accel) damping ===== */
+#define ICM_BUMP_Z_LOW_THR_MS2     (4.0f)    // ✅ 2m/s^2 이하
+#define ICM_BUMP_Z_HIGH_THR_MS2    (14.0f)   // ✅ 15m/s^2 이상
+#define ICM_BUMP_COOLDOWN_MS      (250U)    // 연속 감지 방지
+#define ICM_BUMP_DECAY            (0.95f)   // hold 감쇠 (0~1)
+#define ICM_BUMP_MAX_DEG          (45.0f)   // 최대 댐핑 각도(튜닝)
+#define ICM_BUMP_MIN_DEG          (35.0f)    // 최소 댐핑 각도(튜닝)
 
+    /* ===== ICM bump latch ===== */
+    static float  icm_bump_hold = 0.0f;   // 0~1
+    static uint32 icm_last_bump_ms = 0;
 
+#define MOTOR_TEST_MODE        (1)   // ✅ 1이면 테스트 테스크가 모터를 직접 구동
 
+#define MOTOR_TEST_TASK_PRIO   (SAL_PRIO_APP_CFG + 8)
+#define MOTOR_TEST_TASK_STK_SIZE (128)   // 512B면 충분
+
+/* 테스트 시나리오 */
+#define MOTOR_TEST_START_DELAY_MS   (3000U)  // init+calib 시작 후 3초
+#define MOTOR_TEST_RUN_MS           (7000U)  // 7초 주행
+#define MOTOR_TEST_SPEED_CMD        (800U)   // 모터 속도 800
+
+/* ================================
+ * 2) Global 변수(Task ID/Stack) 추가
+ * ================================ */
+static uint32 gMotorTestTaskID = 0;
+static uint32 gMotorTestTaskStk[MOTOR_TEST_TASK_STK_SIZE];
+
+static void Motor_Test_Task(void *pArg);
 ///
 
 
@@ -384,6 +415,10 @@ typedef struct {
     float pid_pitch_integral;
     float shock_absorb[4];  // ✅ 수정: pre_kick_deg + damp_out 대신 이것만
     float target_deg[4];
+
+    float icm_az_ms2;
+float icm_bump_hold;
+
 } SuspDbg_t;
 
 static volatile SuspDbg_t g_SuspDbg;
@@ -414,6 +449,11 @@ static const uint8 g_ADXL_DEV_TO_WHEEL[ADXL_COUNT] = { WHEEL_RL, WHEEL_FL, WHEEL
 
 
 static uint32 inhibit_until_ms[4] = {0,0,0,0};   // wheel별 inhibit 종료 tick(ms)
+
+
+static volatile uint8  g_leveling_forced_off = 0U;
+static volatile uint32 g_leveling_forced_off_until_ms = 0U;
+
 /*
 ***************************************************************************************************
 *                                         DRIVING MODE (STRUCTURE ONLY)
@@ -562,8 +602,8 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
     
     // 정지/소각도에서 적분 리셋
     if (!on_slope) {
-        if (fabsf(error) < 3.0f) {  // 3mm = 약 1.4도
-            pid->integral *= 0.50f;
+        if (fabsf(error) < 0.5f) {  // 3mm = 약 1.4도
+            pid->integral *= 0.80f;
             
             if (fabsf(pid->integral) < 0.5f) {
                 pid->integral = 0.0f;
@@ -592,21 +632,21 @@ static void compute_leveling_pid(PID_Leveling_t *pid, float error, float dt, uin
 
     // 충격 감지
     float error_change = fabsf(error - pid->prev_error);
-    if (error_change > 8.0f) {
-        pid->integral *= 0.2f;
+    if (error_change > 15.0f) {
+        pid->integral *= 0.6f;
         small_error_cycles = 0;
     }
 
     // 적분 활성화
-    float i_enable = on_slope ? 3.0f : 5.0f;  // 4.0 → 5.0
+    float i_enable = on_slope ? 0.5f : 1.5f;  // 4.0 → 5.0
     
     if (fabsf(error) > i_enable) {
         pid->integral += error * dt;
         pid->integral = clamp(pid->integral, -INTEGRAL_MAX, INTEGRAL_MAX);
         small_error_cycles = 0;
     } else {
-        pid->integral *= 0.95f;
-        if (fabsf(pid->integral) < 0.2f) {
+        pid->integral *= 0.98f;
+        if (fabsf(pid->integral) < 0.1f) {
             pid->integral = 0.0f;
         }
     }
@@ -924,21 +964,34 @@ void Main_StartTask(void * pArg)
     // }
 
     // Task X: ISO2631 (100Hz)
-    err = SAL_TaskCreate(&gISOTaskID,
-                        (const uint8 *)"ISO2631",
-                        (SALTaskFunc)&ISO2631_Task,
-                        &gISOTaskStk[0],
-                        ISO_TASK_STK_SIZE,
-                        ISO_TASK_PRIO,
+    // err = SAL_TaskCreate(&gISOTaskID,
+    //                     (const uint8 *)"ISO2631",
+    //                     (SALTaskFunc)&ISO2631_Task,
+    //                     &gISOTaskStk[0],
+    //                     ISO_TASK_STK_SIZE,
+    //                     ISO_TASK_PRIO,
+    //                     NULL);
+
+    // if(err == SAL_RET_SUCCESS) {
+    //     mcu_printf("[SYSTEM] ISO2631 Task Created (Priority: %d, 100Hz)\n", ISO_TASK_PRIO);
+    // } else {
+    //     mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
+    // }
+
+    #if MOTOR_TEST_MODE
+    err = SAL_TaskCreate(&gMotorTestTaskID,
+                        (const uint8 *)"Motor_Test",
+                        (SALTaskFunc)&Motor_Test_Task,
+                        &gMotorTestTaskStk[0],
+                        MOTOR_TEST_TASK_STK_SIZE,
+                        MOTOR_TEST_TASK_PRIO,
                         NULL);
-
-    if(err == SAL_RET_SUCCESS) {
-        mcu_printf("[SYSTEM] ISO2631 Task Created (Priority: %d, 100Hz)\n", ISO_TASK_PRIO);
+    if (err == SAL_RET_SUCCESS) {
+        mcu_printf("[SYSTEM] Motor Test Task Created (Priority: %d)\n", MOTOR_TEST_TASK_PRIO);
     } else {
-        mcu_printf("[ERROR] Failed to Create ISO2631 Task\n");
+        mcu_printf("[ERROR] Failed to Create Motor Test Task\n");
     }
-
-
+    #endif
 
 
     mcu_printf("[SYSTEM] System Initialization Sequence Finished!\n"); 
@@ -983,6 +1036,13 @@ static void Speed_Control_Task(void *pArg)
     mcu_printf("[SPEED] Task Started\n");
 
     while(1) {
+
+        #if MOTOR_TEST_MODE
+        /* ✅ 테스트 모드에서는 CAN 기반 속도명령 무시 */
+        SAL_TaskSleep(10);
+        continue;
+        #endif
+
         uint32 speed;
         uint8 valid;
 
@@ -1135,7 +1195,7 @@ void IMU_Suspension_Task(void *pArg)
 
     static float wheel_lp_z[4] = {0};
     static float adxl_prev_mag[4] = {0};
-    static uint32 adxl_last_hit_ms[4] = {0};f
+    static uint32 adxl_last_hit_ms[4] = {0};
     static float adxl_impact_hold[4] = {0};
 #endif
 
@@ -1162,6 +1222,7 @@ void IMU_Suspension_Task(void *pArg)
     mcu_printf("  - Damping: ADXL per-wheel (integrated)\n");
     mcu_printf("  - Servo follow: deg/sec rate limiting\n\n");
     
+
    // ========== ADXL 센서 초기화 (테스트 코드 방식) ==========
 
    #if (DAMPING_ENABLE == 1)
@@ -1251,6 +1312,10 @@ for (uint8 i = 0; i < 4; i++) {
 
     while (1) {
         SAL_GetTickCount(&start_tick);
+        uint32 now_ms = 0;
+        SAL_GetTickCount(&now_ms);
+        float az_ms2 = 0.0f;
+
 
         // ========== 1. IMU 읽기 ==========
         if (IMU_Read_Data_DMA() != SAL_RET_SUCCESS) {
@@ -1258,6 +1323,48 @@ for (uint8 i = 0; i < 4; i++) {
             continue;
         }
         imuRaw = IMU;
+
+                     /* 1) accel 단위 자동 판별 (g vs m/s^2) */
+        float ax_u = imuRaw.accel_x;
+        float ay_u = imuRaw.accel_y;
+        float az_u = imuRaw.accel_z;
+
+        float mag_u = sqrtf(ax_u*ax_u + ay_u*ay_u + az_u*az_u);
+
+        /* mag가 0.7~1.3 근처면 g 단위로 보고 변환 */
+        if (mag_u > 0.7f && mag_u < 1.3f) {
+            az_ms2 = az_u * 9.80665f;
+        } else {
+            az_ms2 = az_u;   // 이미 m/s^2라고 가정
+        }
+
+        /* 2) bump 트리거: (<=2) OR (>=15) + 쿨다운 */
+        if ((az_ms2 <= ICM_BUMP_Z_LOW_THR_MS2) || (az_ms2 >= ICM_BUMP_Z_HIGH_THR_MS2)) {
+            if ((now_ms - icm_last_bump_ms) >= ICM_BUMP_COOLDOWN_MS) {
+                icm_last_bump_ms = now_ms;
+
+                float t = 0.0f;
+
+                if (az_ms2 >= ICM_BUMP_Z_HIGH_THR_MS2) {
+                    /* 15 초과분을 15로 나눠 0~1 */
+                    float over = az_ms2 - ICM_BUMP_Z_HIGH_THR_MS2;
+                    t = over / ICM_BUMP_Z_HIGH_THR_MS2;
+                } else { /* az_ms2 <= 2 */
+                    /* 2 미만분을 2로 나눠 0~1 (더 낮을수록 더 강하게) */
+                    float under = ICM_BUMP_Z_LOW_THR_MS2 - az_ms2;
+                    t = under / ICM_BUMP_Z_LOW_THR_MS2;
+                }
+
+                t = clamp(t, 0.0f, 1.0f);
+
+                /* hold는 "큰 충격이면 더 크게" */
+                if (t > icm_bump_hold) icm_bump_hold = t;
+            }
+        }
+
+        /* 3) 매 주기 감쇠 */
+        icm_bump_hold *= ICM_BUMP_DECAY;
+        if (icm_bump_hold < 0.01f) icm_bump_hold = 0.0f;
 
         // ========== 2. 캘리브레이션 단계 ==========
         
@@ -1312,11 +1419,7 @@ for (uint8 i = 0; i < 4; i++) {
             g_IMUData.roll  = 0.0f;
             g_IMUData.pitch = 0.0f;
             SAL_CoreCriticalExit();
-
-            SAL_TaskSleep(IMU_SUSP_PERIOD_MS);
-            continue;
         }
-
         /* ===== Phase 2: ADXL 캘리브 ===== */
         #if (DAMPING_ENABLE == 1)
         if (!adxl_calibration_done) {
@@ -1464,11 +1567,8 @@ for (uint8 i = 0; i < 4; i++) {
         #if (DAMPING_ENABLE == 1)
         static uint8 adxl_batch = 0;  // 0 or 1
         
-        uint32 now_ms;
-        SAL_GetTickCount(&now_ms);
-        
-        float wheel_accel_z[4];
-        
+        float wheel_accel_z[4] = {0,0,0,0};   // ✅ 필수
+
         // 짝수 주기: 센서 0, 1 / 홀수 주기: 센서 2, 3
         uint8 start_dev = adxl_batch * 2;
         uint8 end_dev = start_dev + 2;
@@ -1554,15 +1654,52 @@ for (uint8 i = 0; i < 4; i++) {
                         (fabsf(avg_pitch) > SLOPE_ANGLE_THRESHOLD && pitch_diff < SLOPE_VARIANCE_MAX));
         }
 
+    /* 100Hz 기준: 3초 = 300 cycles */
+    static uint32 slope_persist_cnt = 0;
+    static uint32 flat_persist_cnt  = 0;
+
+    /* ✅ 여기서 total_tilt/pseudo_slope/slope_like를 먼저 계산 */
+    float total_tilt = fabsf(roll) + fabsf(pitch);
+
+    static float tilt_hold = 0.0f;
+    tilt_hold = 0.98f * tilt_hold + 0.02f * total_tilt;
+
+    uint8 pseudo_slope = (tilt_hold > 8.0f) ? 1U : 0U;
+    uint8 slope_like   = (on_slope || pseudo_slope) ? 1U : 0U;
+
+    /* slope_like(또는 on_slope)를 "언덕/내리막" 판단 기준으로 사용 */
+    if (slope_like) {
+        slope_persist_cnt++;
+        flat_persist_cnt = 0;
+
+        if (slope_persist_cnt >= (SLOPE_DISABLE_HOLD_MS / IMU_SUSP_PERIOD_MS)) {
+            g_leveling_forced_off = 1U;
+
+            /* 평지로 돌아왔을 때 바로 켜지지 않게 유예시간 */
+            uint32 now_ms2 = 0;
+            SAL_GetTickCount(&now_ms2);
+            g_leveling_forced_off_until_ms = now_ms2 + SLOPE_ENABLE_HYST_MS;
+        }
+    } else {
+        flat_persist_cnt++;
+        slope_persist_cnt = 0;
+
+        /* 평지 상태가 유지되고 + 유예시간도 지났으면 leveling 다시 허용 */
+        if (g_leveling_forced_off) {
+            uint32 now_ms2 = 0;
+            SAL_GetTickCount(&now_ms2);
+
+            if (now_ms2 >= g_leveling_forced_off_until_ms) {
+                /* 평지가 조금은 유지된 뒤에만 복귀 (선택) */
+                if (flat_persist_cnt >= (SLOPE_ENABLE_HYST_MS / IMU_SUSP_PERIOD_MS)) {
+                    g_leveling_forced_off = 0U;
+                }
+            }
+        }
+    }
+    
+
         // ========== 6. 제어 파라미터 ==========
-        
-        float total_tilt = fabsf(roll) + fabsf(pitch);
-        
-        static float tilt_hold = 0.0f;
-        tilt_hold = 0.98f * tilt_hold + 0.02f * total_tilt;
-        uint8 pseudo_slope = (tilt_hold > 3.0f) ? 1U : 0U;
-        
-        uint8 slope_like = (on_slope || pseudo_slope) ? 1U : 0U;
         
         float soft_w = 0.0f;
         if (total_tilt <= SMALL_TILT_MIN) soft_w = 0.0f;
@@ -1663,6 +1800,33 @@ for (uint8 i = 0; i < 4; i++) {
         }
         #endif
 
+                /* =========================================================
+         * Apply ICM bump damping to all wheels (symmetric)
+         * ========================================================= */
+        if (icm_bump_hold > 0.0f) {
+            /* hold(0~1) -> deg (최소~최대) */
+            float bump_deg = -(ICM_BUMP_MIN_DEG + (ICM_BUMP_MAX_DEG - ICM_BUMP_MIN_DEG) * icm_bump_hold);
+
+            /* 기존 shock_absorb가 있다면 더 큰 magnitude를 우선 */
+            for (uint8 i = 0; i < 4; i++) {
+                /* “짧게 크게”를 위해 현재값보다 크면 갱신 */
+                if (fabsf(bump_deg) > fabsf(shock_absorb[i])) {
+                    shock_absorb[i] = bump_deg;
+                } else {
+                    /* 자연 감쇠 */
+                    shock_absorb[i] *= 0.85f;
+                }
+                shock_absorb[i] = clamp(shock_absorb[i], -30.0f, 30.0f);
+            }
+        } else {
+            /* bump 없으면 shock_absorb는 서서히 0으로 */
+            for (uint8 i = 0; i < 4; i++) {
+                shock_absorb[i] *= 0.85f;
+                if (fabsf(shock_absorb[i]) < 0.2f) shock_absorb[i] = 0.0f;
+            }
+        }
+
+
         // ========== 8. 레벨링 PID ==========
         
         float leveling[4] = {0, 0, 0, 0};
@@ -1676,6 +1840,13 @@ for (uint8 i = 0; i < 4; i++) {
         SAL_CoreCriticalEnter();
         uint8 leveling_on = g_CANData.leveling_enable;
         SAL_CoreCriticalExit();
+
+        if (g_leveling_forced_off) {
+            leveling_on = 0U;
+            /* 강제 OFF일 때 PID 누적 남아있으면 위험하니까 리셋 */
+            reset_leveling_pid(&pid_roll);
+            reset_leveling_pid(&pid_pitch);
+        }
 
         uint8 slope_state = slope_like;
 
@@ -1698,7 +1869,7 @@ for (uint8 i = 0; i < 4; i++) {
             if (slope_like) {
                 leveling_gain_scale = 1.0f;
             } else {
-                leveling_gain_scale = (0.6f + 0.4f * soft_w);
+                leveling_gain_scale = (0.9f + 0.1f * soft_w);
             }
 
             static float prev_roll_f=0, prev_pitch_f=0;
@@ -1715,28 +1886,23 @@ for (uint8 i = 0; i < 4; i++) {
             prev_roll_f = roll; prev_pitch_f = pitch;
             prev_dr = dr; prev_dp = dp;
 
-            float osc_damping = 1.0f;
-            if (!on_slope && osc_count > 0) {
-                osc_damping = 0.4f;
-            }
-
             float roll_for_level  = slope_state ? avg_roll  : roll;
             float pitch_for_level = slope_state ? avg_pitch : pitch;
 
             float roll_height_mm  = angle_to_height_mm(roll_for_level,  TRACK_WIDTH_MM * 0.5f);
             float pitch_height_mm = angle_to_height_mm(pitch_for_level, WHEELBASE_MM   * 0.5f);
 
-            roll_height_mm  = apply_deadband(roll_height_mm,  3.0f);
-            pitch_height_mm = apply_deadband(pitch_height_mm, 3.0f);
+            roll_height_mm  = apply_deadband(roll_height_mm,  0.0f);
+            pitch_height_mm = apply_deadband(pitch_height_mm, 0.0f);
 
-            if (fabsf(roll_for_level) < 0.2f) roll_height_mm = 0.0f;
-            if (fabsf(pitch_for_level) < 0.2f) pitch_height_mm = 0.0f;
+            if (fabsf(roll_for_level) < 0.05f) roll_height_mm = 0.0f;
+            if (fabsf(pitch_for_level) < 0.05f) pitch_height_mm = 0.0f;
 
             compute_leveling_pid(&pid_roll,  LEVELING_SIGN_ROLL  * roll_height_mm,  dt, slope_state);
             compute_leveling_pid(&pid_pitch, LEVELING_SIGN_PITCH * pitch_height_mm, dt, slope_state);
                         
-            float roll_ctrl_mm  = pid_roll.output  * boost * leveling_gain_scale * osc_damping;
-            float pitch_ctrl_mm = pid_pitch.output * boost * leveling_gain_scale * osc_damping;
+            float roll_ctrl_mm  = pid_roll.output  * boost * leveling_gain_scale;
+            float pitch_ctrl_mm = pid_pitch.output * boost * leveling_gain_scale;
 
             float roll_ctrl_deg  = height_to_servo_deg(roll_ctrl_mm,  MAX_CORRECTION_DEG);
             float pitch_ctrl_deg = height_to_servo_deg(pitch_ctrl_mm, MAX_CORRECTION_DEG);
@@ -1805,19 +1971,15 @@ for (uint8 i = 0; i < 4; i++) {
         total_tilt = fabsf(roll) + fabsf(pitch);
 
         float rate_deg_s;
+
         if (slope_like) {
-            rate_deg_s = SERVO_RATE_SLOPE;
+            rate_deg_s = SERVO_RATE_SLOPE;  // 600
         } else {
-            float rate_deg_s;
-            if (slope_like) {
-                rate_deg_s = SERVO_RATE_SLOPE;  // 600 deg/s
-            } else {
-                // soft_w에 따라 400~800 deg/s (기존 120~300에서 대폭 상향)
-                float rate_min = 400.0f;  // ✅ 120 → 400
-                float rate_max = SERVO_RATE_FLAT_FAST;  // 800
-                rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
-            }
+            float rate_min = 400.0f;
+            float rate_max = SERVO_RATE_FLAT_FAST; // 1000
+            rate_deg_s = rate_min + (rate_max - rate_min) * soft_w;
         }
+
 
         float dt_s = (float)IMU_SUSP_PERIOD_MS / 1000.0f;
         float max_step = rate_deg_s * dt_s;
@@ -1862,6 +2024,9 @@ for (uint8 i = 0; i < 4; i++) {
             g_SuspDbg.shock_absorb[i] = shock_absorb[i];
             g_SuspDbg.target_deg[i]   = target_deg[i];
         }
+        g_SuspDbg.icm_az_ms2 = az_ms2;
+        g_SuspDbg.icm_bump_hold = icm_bump_hold;
+
         SAL_CoreCriticalExit();
 
         // ========== 11. 서보 출력 ==========
@@ -2127,6 +2292,13 @@ void Monitoring_Task(void *pArg)
         Print_Float_Value(dbg.target_deg[WHEEL_RR], 100);
         mcu_printf("\n");
 
+        mcu_printf("[ICM_BUMP] az:");
+        Print_Float_Value(dbg.icm_az_ms2, 100);
+        mcu_printf(" m/s2 | hold:");
+        Print_Float_Value(dbg.icm_bump_hold, 1000);
+        mcu_printf("\n");
+
+
         mcu_printf("==========================================\n");
 
         SAL_TaskSleep(MONITOR_PERIOD_MS);
@@ -2214,7 +2386,7 @@ static void ISO2631_Task(void *pArg)
 
     while (1) {
         SAL_GetTickCount(&start_tick);
-
+        
         // ✅ IMU 데이터 읽기
         float roll, pitch, az;
         uint32 now_ms;
@@ -2266,7 +2438,61 @@ static void ISO2631_Task(void *pArg)
 }
 
 
+static void Motor_Test_Task(void *pArg)
+{
+    (void)pArg;
 
+    mcu_printf("[MOTOR_TEST] Task Started\n");
+
+    /* 1) init + calib 시퀀스가 '시작'되었는지 대기
+       - 너 코드에서 g_IMU_SUSP_INIT_DONE=1은 IMU task가 캘리브 들어가기 전 set됨 */
+    while (1) {
+        uint8 inited;
+        SAL_CoreCriticalEnter();
+        inited = g_IMU_SUSP_INIT_DONE;
+        SAL_CoreCriticalExit();
+
+        if (inited != 0U) break;
+        SAL_TaskSleep(10);
+    }
+
+    mcu_printf("[MOTOR_TEST] IMU init/calib sequence started -> wait %d ms\n",
+               (int)MOTOR_TEST_START_DELAY_MS);
+    SAL_TaskSleep(MOTOR_TEST_START_DELAY_MS);
+
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+    mcu_printf("[MOTOR_TEST] GO speed=%d for %d ms\n",
+               (int)MOTOR_TEST_SPEED_CMD, (int)MOTOR_TEST_RUN_MS);
+
+    MotorControl_SetSpeed((uint32)MOTOR_TEST_SPEED_CMD);
+
+    /* 혹시 다른 경로가 건드릴까봐 100ms마다 한번 더 유지(안전) */
+    uint32 t0 = 0, now = 0;
+    SAL_GetTickCount(&t0);
+    while (1) {
+        SAL_GetTickCount(&now);
+        if ((now - t0) >= MOTOR_TEST_RUN_MS) break;
+        MotorControl_SetSpeed((uint32)MOTOR_TEST_SPEED_CMD);
+        SAL_TaskSleep(100);
+    }
+
+    MotorControl_SetSpeed(0U);
+    mcu_printf("[MOTOR_TEST] STOP\n");
+
+    /* 상태 스냅샷(선택) */
+    SAL_CoreCriticalEnter();
+    gDriveLastSpeed = 0U;
+    SAL_CoreCriticalExit();
+
+#else
+    mcu_printf("[MOTOR_TEST] MCU_BSP_SUPPORT_MOTOR_PDM=0 -> motor control not available\n");
+#endif
+
+    /* 1회 실행 후 idle */
+    while (1) {
+        SAL_TaskSleep(1000);
+    }
+}
 
 
 
