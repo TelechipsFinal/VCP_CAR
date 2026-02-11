@@ -23,8 +23,10 @@
 /* CAN ID Definitions */
 #define CAN_CTRL_ID_SPEED               (0x20U)
 #define CAN_CTRL_ID_STEERING            (0x21U)
+#define CAN_CTRL_ID_SPEED_BOOST         (0x23U)
 #define CAN_CTRL_ID_DRIVEMODE           (0x30U)
 #define CAN_CTRL_ID_SPEED_LIMIT         (0x40U)
+#define CAN_CTRL_ID_IW_TEST_MODE        (0x42U)
 
 /* Steering Data Values */
 #define CAN_CTRL_DATA_LEFT              (0x00U)

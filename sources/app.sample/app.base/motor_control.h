@@ -30,10 +30,10 @@
 #define L298N_IN3_PIN                   (GPIO_GPC(5UL))   /* A4 (Motor B IN3) */
 #define L298N_IN4_PIN                   (GPIO_GPC(4UL))   /* A5 (Motor B IN4) */
 
-/* L298N ENA/ENB use PDM output (A8/A9 header) */
-#define L298N_PDM_CH_A                  (4UL)             /* CH2 + ch2 -> GPC8(A8), ENA */
-#define L298N_PDM_CH_B                  (5UL)             /* CH2 + ch3 -> GPC9(A9), ENB */
-#define L298N_PDM_OUT_SEL_CH            (GPIO_PERICH_CH3) /* GPIO_C group */
+/* L298N ENA/ENB use PDM output (header 39/38) */
+#define L298N_PDM_CH_A                  (4UL)             /* CH3 + ch4 -> GPK12 (header 39), ENA */
+#define L298N_PDM_CH_B                  (5UL)             /* CH3 + ch5 -> GPK13 (header 38), ENB */
+#define L298N_PDM_OUT_SEL_CH            (GPIO_PERICH_CH3) /* GPIO_K group */
 
 void MotorControl_Init
 (

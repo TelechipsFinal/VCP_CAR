@@ -176,7 +176,8 @@
 #define KALMAN_R_MAX            (5.00f)  // 흔들릴 때 accel 거의 무시
 
 /* ===== 수평제어 OFF 테스트 모드 ===== */
-#define INDEPENDENT_WHEEL_TEST_MODE   (0)
+#define INDEPENDENT_WHEEL_TEST_MODE_DEFAULT   (0)
+static volatile uint8 gIndependentWheelTestMode = INDEPENDENT_WHEEL_TEST_MODE_DEFAULT;
 
 
 
@@ -981,15 +982,84 @@ static void Speed_Control_Task(void *pArg)
 
     mcu_printf("[SPEED] Task Started\n");
 
+    static uint8  boost_active = 0U;
+    static uint32 boost_start_tick = 0U;
+    static uint32 boost_restore_speed = 0U;
+    static uint8  boost_restore_valid = 0U;
+    static uint32 pending_speed = 0U;
+    static uint8  pending_valid = 0U;
+
     while(1) {
         uint32 speed;
         uint8 valid;
+        uint8 boost_req;
+        uint8 boost_valid;
+        uint32 now;
 
         SAL_CoreCriticalEnter();
         speed = gDriveCmd.speed;
         valid = gDriveCmd.speed_valid;
         gDriveCmd.speed_valid = 0U;
+        boost_req = gDriveCmd.speed_boost_req;
+        boost_valid = gDriveCmd.speed_boost_valid;
+        gDriveCmd.speed_boost_valid = 0U;
         SAL_CoreCriticalExit();
+
+        if (boost_valid != 0U) {
+            if (boost_req != 0U) {
+                if (gDriveLastSpeed > 550U) {
+                    SAL_GetTickCount(&now);
+                    boost_active = 1U;
+                    boost_start_tick = now;
+                    boost_restore_speed = gDriveLastSpeed;
+                    boost_restore_valid = 1U;
+                    mcu_printf("[SPEED] Boost override: 550 for 3000ms\n");
+                } else {
+                    mcu_printf("[SPEED] Boost ignored (speed <= 550)\n");
+                }
+            }
+        }
+
+        if (boost_active != 0U) {
+            SAL_GetTickCount(&now);
+            if ((now - boost_start_tick) >= 3000U) {
+                boost_active = 0U;
+                mcu_printf("[SPEED] Boost override end\n");
+                if (pending_valid != 0U) {
+                    speed = pending_speed;
+                    valid = 1U;
+                    pending_valid = 0U;
+                } else if (boost_restore_valid != 0U) {
+                    speed = boost_restore_speed;
+                    valid = 1U;
+                    boost_restore_valid = 0U;
+                }
+            }
+        }
+
+        if (boost_active != 0U) {
+            if (valid != 0U) {
+                pending_speed = speed;
+                pending_valid = 1U;
+            }
+            if (gDriveLastSpeed != 550U) {
+#if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
+                MotorControl_SetSpeed(550U);
+#endif
+                SAL_CoreCriticalEnter();
+                gDriveLastSpeed = 550U;
+                SAL_CoreCriticalExit();
+                mcu_printf("[SPEED] Speed: %d\n", (int)550);
+            }
+            SAL_TaskSleep(10);
+            continue;
+        }
+
+        if (pending_valid != 0U) {
+            speed = pending_speed;
+            valid = 1U;
+            pending_valid = 0U;
+        }
 
         if (valid != 0U) {
 #if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
@@ -1666,15 +1736,32 @@ for (uint8 i = 0; i < 4; i++) {
         
         float leveling[4] = {0, 0, 0, 0};
 
-        #if INDEPENDENT_WHEEL_TEST_MODE
-        /* 테스트 모드: 레벨링 OFF */
-        reset_leveling_pid(&pid_roll);
-        reset_leveling_pid(&pid_pitch);
-        #else
-        /* 정상 레벨링 */
+        uint8 iw_test_update = 0U;
+        uint8 iw_test_mode = 0U;
+
         SAL_CoreCriticalEnter();
-        uint8 leveling_on = g_CANData.leveling_enable;
+        iw_test_update = gDriveCmd.iw_test_valid;
+        if (iw_test_update != 0U) {
+            iw_test_mode = gDriveCmd.iw_test_mode;
+            gDriveCmd.iw_test_valid = 0U;
+        }
         SAL_CoreCriticalExit();
+
+        if (iw_test_update != 0U) {
+            gIndependentWheelTestMode = (iw_test_mode != 0U) ? 1U : 0U;
+            mcu_printf("[IMU] Independent wheel test mode: %s\n",
+                       (gIndependentWheelTestMode != 0U) ? "ON" : "OFF");
+        }
+
+        if (gIndependentWheelTestMode != 0U) {
+            /* 테스트 모드: 레벨링 OFF */
+            reset_leveling_pid(&pid_roll);
+            reset_leveling_pid(&pid_pitch);
+        } else {
+            /* 정상 레벨링 */
+            SAL_CoreCriticalEnter();
+            uint8 leveling_on = g_CANData.leveling_enable;
+            SAL_CoreCriticalExit();
 
         uint8 slope_state = slope_like;
 
@@ -1775,7 +1862,7 @@ for (uint8 i = 0; i < 4; i++) {
             reset_leveling_pid(&pid_roll);
             reset_leveling_pid(&pid_pitch);
         }
-        #endif
+        }
 
         // ========== 9. 통합 제어 ==========
         
@@ -2065,12 +2152,9 @@ void Monitoring_Task(void *pArg)
         mcu_printf(" deg\n");
 
         mcu_printf("Mode: %s\n",
-        #if INDEPENDENT_WHEEL_TEST_MODE
-                "INDEPENDENT_WHEEL_TEST (NO LEVELING)"
-        #else
-                "NORMAL (LEVELING + ADXL)"
-        #endif
-        );
+                   (gIndependentWheelTestMode != 0U) ?
+                   "INDEPENDENT_WHEEL_TEST (NO LEVELING)" :
+                   "NORMAL (LEVELING + ADXL)");
 
         {
             uint8 any = 0;

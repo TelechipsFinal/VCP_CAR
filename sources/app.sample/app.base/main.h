@@ -50,6 +50,10 @@ typedef struct {
     uint8  speed_valid;
     uint8  steering_valid;
     uint8  drivemode_valid;
+    uint8  iw_test_mode;       // 0=normal, 1=independent wheel test
+    uint8  iw_test_valid;
+    uint8  speed_boost_req;    // 1=boost request
+    uint8  speed_boost_valid;
     uint32 last_rx_tick;
 } DriveCmd_t;
 

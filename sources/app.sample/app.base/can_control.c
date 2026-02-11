@@ -154,6 +154,30 @@ static void CAN_ControlProcessMessage
             mcu_printf( "[CAN CTRL] Steering: 0x%X\n", steer );
             break;
         }
+        case CAN_CTRL_ID_SPEED_BOOST:
+        {
+            if (psRxMsg->mDataLength == 0U) {
+                mcu_printf("[CAN CTRL] SpeedBoost empty data (ID: 0x%X)\n", psRxMsg->mId);
+                break;
+            }
+
+            uint8 boost = psRxMsg->mData[0];
+            if ((boost >= (uint8)'0') && (boost <= (uint8)'9')) {
+                boost = (uint8)(boost - (uint8)'0');
+            }
+
+            if (boost == 1U) {
+                SAL_CoreCriticalEnter();
+                gDriveCmd.speed_boost_req = 1U;
+                gDriveCmd.speed_boost_valid = 1U;
+                SAL_GetTickCount(&gDriveCmd.last_rx_tick);
+                SAL_CoreCriticalExit();
+                mcu_printf("[CAN CTRL] SpeedBoost: 1\n");
+            } else {
+                mcu_printf("[CAN CTRL] SpeedBoost ignored: 0x%X\n", boost);
+            }
+            break;
+        }
         case CAN_CTRL_ID_DRIVEMODE:
         {
             if (psRxMsg->mDataLength == 0U) {
@@ -170,6 +194,27 @@ static void CAN_ControlProcessMessage
             SAL_CoreCriticalExit();
 
             mcu_printf("[CAN CTRL] DriveMode: 0x%X\n", mode);
+            break;
+        }
+        case CAN_CTRL_ID_IW_TEST_MODE:
+        {
+            if (psRxMsg->mDataLength == 0U) {
+                mcu_printf("[CAN CTRL] IW Test empty data (ID: 0x%X)\n", psRxMsg->mId);
+                break;
+            }
+
+            uint8 mode = psRxMsg->mData[0];
+            if ((mode >= (uint8)'0') && (mode <= (uint8)'9')) {
+                mode = (uint8)(mode - (uint8)'0');
+            }
+
+            SAL_CoreCriticalEnter();
+            gDriveCmd.iw_test_mode = (mode != 0U) ? 1U : 0U;
+            gDriveCmd.iw_test_valid = 1U;
+            SAL_GetTickCount(&gDriveCmd.last_rx_tick);
+            SAL_CoreCriticalExit();
+
+            mcu_printf("[CAN CTRL] IW Test Mode: %d\n", (int)((mode != 0U) ? 1 : 0));
             break;
         }
         case CAN_CTRL_ID_SPEED_LIMIT:
