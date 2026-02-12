@@ -42,6 +42,16 @@ void CAN_ControlPoll
     void
 );
 
+uint8 CAN_ControlIsRxSemaphoreReady
+(
+    void
+);
+
+uint32 CAN_ControlGetRxSemaphoreId
+(
+    void
+);
+
 void CAN_ControlSendSpeed
 (
     void

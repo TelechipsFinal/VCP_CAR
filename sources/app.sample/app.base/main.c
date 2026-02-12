@@ -966,8 +966,16 @@ static void CAN_RX_Task(void *pArg)
     mcu_printf("[CAN_RX] Task Started\n");
 
     while(1) {
+        if( CAN_ControlIsRxSemaphoreReady() != 0U )
+        {
+            (void)SAL_SemaphoreWait(CAN_ControlGetRxSemaphoreId(), 0UL, SAL_OPT_BLOCKING);
+        }
+        else
+        {
+            SAL_TaskSleep(100);
+        }
+
         CAN_ControlPoll();
-        SAL_TaskSleep(100);
     }
 }
 

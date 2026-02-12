@@ -27,9 +27,10 @@
 #include "motor_control.h"
 #endif
 
-static CANFlagValue_t gRxFlag = CAN_FLAG_FALSE;
 static uint8 gTargetChannel = 0U;
 static uint32 gLastSpeed = 0U;
+static uint32 gRxSemId = 0U;
+static uint8 gRxSemReady = 0U;
 
 static void CAN_ControlCallbackRx
 (
@@ -41,7 +42,10 @@ static void CAN_ControlCallbackRx
 {
     if( ( uiError == CAN_ERROR_NONE ) && ( ucCh == gTargetChannel ) )
     {
-        gRxFlag = CAN_FLAG_TRUE;
+        if( gRxSemReady != 0U )
+        {
+            (void)SAL_SemaphoreRelease(gRxSemId);
+        }
     }
 
     ( void ) uiRxIndex;
@@ -242,7 +246,16 @@ void CAN_ControlInit
 )
 {
     gTargetChannel = ucChannel;
-    gRxFlag = CAN_FLAG_FALSE;
+    gRxSemReady = 0U;
+
+    if( SAL_SemaphoreCreate(&gRxSemId, (const uint8 *)"CAN_RX_SEM", 0UL, SAL_OPT_BLOCKING) == SAL_RET_SUCCESS )
+    {
+        gRxSemReady = 1U;
+    }
+    else
+    {
+        mcu_printf("[CAN CTRL] RX semaphore create failed, fallback to polling mode\n");
+    }
 
 #if ( MCU_BSP_SUPPORT_MOTOR_PDM == 1 )
     MotorControl_Init();
@@ -261,27 +274,38 @@ void CAN_ControlPoll
     uint32          uiRxMsgNum;
     CANMessage_t    sRxMsg;
 
-    if( gRxFlag == CAN_FLAG_TRUE )
-    {
-        uiRxMsgNum = CAN_CheckNewRxMessage( gTargetChannel );
-        if (uiRxMsgNum > 0UL) {
-            mcu_printf("[CAN CTRL] RX pending: %lu\n", (unsigned long)uiRxMsgNum);
-        }
-
-        while( uiRxMsgNum > 0UL )
-        {
-            ( void ) SAL_MemSet( &sRxMsg, 0, sizeof( CANMessage_t ) );
-
-            if( CAN_GetNewRxMessage( gTargetChannel, &sRxMsg ) == CAN_ERROR_NONE )
-            {
-                CAN_ControlProcessMessage( &sRxMsg );
-            }
-
-            uiRxMsgNum = CAN_CheckNewRxMessage( gTargetChannel );
-        }
-
-        gRxFlag = CAN_FLAG_FALSE;
+    uiRxMsgNum = CAN_CheckNewRxMessage( gTargetChannel );
+    if (uiRxMsgNum > 0UL) {
+        mcu_printf("[CAN CTRL] RX pending: %lu\n", (unsigned long)uiRxMsgNum);
     }
+
+    while( uiRxMsgNum > 0UL )
+    {
+        ( void ) SAL_MemSet( &sRxMsg, 0, sizeof( CANMessage_t ) );
+
+        if( CAN_GetNewRxMessage( gTargetChannel, &sRxMsg ) == CAN_ERROR_NONE )
+        {
+            CAN_ControlProcessMessage( &sRxMsg );
+        }
+
+        uiRxMsgNum = CAN_CheckNewRxMessage( gTargetChannel );
+    }
+}
+
+uint8 CAN_ControlIsRxSemaphoreReady
+(
+    void
+)
+{
+    return gRxSemReady;
+}
+
+uint32 CAN_ControlGetRxSemaphoreId
+(
+    void
+)
+{
+    return gRxSemId;
 }
 
 void CAN_ControlSendSpeed

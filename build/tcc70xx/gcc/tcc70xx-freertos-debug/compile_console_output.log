@@ -126,3 +126,5 @@ compile: ../../../sources/app.sample/app.base/ISO2631-1.c
 compile: ../../../sources/dev.drivers/i2c/i2c.c
 compile: ../../../sources/app.sample/app.base/main.c
 compile: ../../../sources/app.sample/app.base/main.c
+compile: ../../../sources/app.sample/app.base/main.c
+compile: ../../../sources/app.sample/app.base/can_control.c
